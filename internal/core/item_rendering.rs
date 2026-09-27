@@ -144,12 +144,21 @@ impl<T> ItemCache<T> {
         self.map.borrow().is_empty()
     }
 
-    /// Keeps only the entries for which `f` returns true.
-    pub fn retain(&self, mut f: impl FnMut(&T) -> bool) {
-        self.map.borrow_mut().retain(|_, per_component| {
-            per_component.retain(|_, entry| f(&entry.data));
-            !per_component.is_empty()
-        });
+    // LISTARY PATCH: replaces upstream's `retain`, whose only caller was the text layout cache's
+    // sweep. Removing an entry also removed its dependency tracker, which cut the link from a
+    // `Text`'s string to its repaint (see PATCH-NOTES.md).
+    /// Calls `f` on the data of every entry.
+    ///
+    /// This deliberately offers no way to remove an entry: its dependency tracker is what links
+    /// the item's rendering to the properties the cached value was computed from, and dropping
+    /// it would silently cut that link while the item lives on. To free memory, empty the data
+    /// in place and recompute it on the next access instead.
+    pub fn for_each_mut(&self, mut f: impl FnMut(&mut T)) {
+        for per_component in self.map.borrow_mut().values_mut() {
+            for entry in per_component.values_mut() {
+                f(&mut entry.data);
+            }
+        }
     }
 
     /// Returns a [`RefMut`](std::cell::RefMut) referencing the cached value associated with

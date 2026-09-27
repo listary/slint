@@ -32,6 +32,8 @@ struct CachedParagraphs {
     /// `None` while a [`CachedParagraphsGuard`] has the paragraphs checked out; the guard puts
     /// them back when it drops. Finding `None` here therefore means the previous caller returned
     /// without handing them back, and the entry has to be reshaped rather than served empty.
+    // LISTARY PATCH: a sweep also leaves `None` here; `cached_paragraphs` then shapes again and
+    // refills the entry, keeping its tracker (see `sweep`).
     paragraphs: Option<Vec<TextParagraph>>,
     /// The [`TextLayoutCache::generation`] at which this entry was last served.
     last_used: u32,
@@ -122,14 +124,29 @@ impl TextLayoutCache {
         self.generation.set(self.generation.get().wrapping_add(1));
     }
 
-    /// Drops the entries that were not served in the current or the previous frame.
+    // LISTARY PATCH: upstream removed the stale entries here, trackers included; this keeps them
+    // and drops only their paragraphs (see PATCH-NOTES.md).
+    /// Drops the paragraphs of the entries that were not served in the current or the previous
+    /// frame.
+    ///
+    /// The entries themselves stay: an entry's dependency tracker is the only thing that reads the
+    /// item's text, so it is also the only link from a text change to the item's rendering (the
+    /// partial renderer's per-item tracker depends on the entry, not on the text). Removing the
+    /// entry would leave an item that is not redrawn for its next text change. Without its
+    /// paragraphs the entry is shaped again and refilled on its next use (see `cached_paragraphs`).
     fn sweep(&self) {
         let generation = self.generation.get();
         let mut kept = 0;
-        self.inner.retain(|entry| {
-            let keep = generation.wrapping_sub(entry.last_used) <= 1;
-            kept += keep as usize;
-            keep
+        self.inner.for_each_mut(|entry| {
+            if entry.paragraphs.is_none() {
+                return;
+            }
+            if generation.wrapping_sub(entry.last_used) <= 1 {
+                kept += 1;
+            } else {
+                entry.paragraphs = None;
+                entry.line_breaking = None;
+            }
         });
         self.entry_count_estimate.set(kept);
         self.sweep_threshold.set(ENTRY_LIMIT.max(kept + ENTRY_LIMIT / 2));
@@ -233,25 +250,34 @@ pub(super) fn cached_paragraphs<'a>(
 
     cache.clear_if_scale_factor_changed(window);
 
-    // Shaped geometry must never be mixed across wrap modes, and the entry only holds one mode
-    // at a time. Drop a mismatching one up front so the shaping below happens in the regular
-    // (vacant) path, inside a fresh dependency tracker and without the cache borrowed.
-    //
-    // Paragraphs that were never handed back can't be served either.
-    let stale = cache
-        .inner
-        .with_entry(item_rc, |entry| {
-            (entry.wrap != wrap || entry.paragraphs.is_none()).then_some(())
-        })
-        .is_some();
-    if stale {
-        cache.inner.release(item_rc);
-    }
-
-    // Sweep before this item's entry is checked out and blocks `retain`'s access.
+    // Sweep before this item's entry is checked out and blocks `for_each_mut`'s access.
+    // LISTARY PATCH: moved up from after the wrap check below, so that an entry this sweep empties,
+    // this item's own included, goes through the refill below instead of being served empty.
     if cache.entry_count_estimate.get() > cache.sweep_threshold.get() {
         cache.sweep();
     }
+
+    // Shaped geometry must never be mixed across wrap modes, and the entry only holds one mode
+    // at a time. Drop a mismatching one up front so the shaping below happens in the regular
+    // (vacant) path, inside a fresh dependency tracker and without the cache borrowed.
+    let wrap_changed = cache
+        .inner
+        .with_entry(item_rc, |entry| (entry.wrap != wrap).then_some(()))
+        .is_some();
+    if wrap_changed {
+        cache.inner.release(item_rc);
+    }
+
+    // LISTARY PATCH: an entry without paragraphs (emptied by a sweep, or never handed back) is not
+    // released but refilled. Its tracker is what the item's rendering depends on; releasing it
+    // would register the new tracker with whichever binding runs this lookup, which may be a
+    // layout query rather than the item's rendering. Its tracker is usually clean, so the lookup
+    // below would not reshape: shape now, while the cache is not borrowed, and put the result into
+    // the entry. If the tracker is dirty the lookup reshapes anyway and this result is dropped.
+    let refill = cache
+        .inner
+        .with_entry(item_rc, |entry| entry.paragraphs.is_none().then_some(()))
+        .map(|()| shape(font_context));
 
     let mut entry = cache.inner.get_or_update_cache_entry_ref(item_rc, || {
         #[cfg(feature = "testing")]
@@ -265,6 +291,16 @@ pub(super) fn cached_paragraphs<'a>(
         }
     });
     entry.last_used = cache.generation.get();
+    // LISTARY PATCH: see `refill` above.
+    if entry.paragraphs.is_none()
+        && let Some(paragraphs) = refill
+    {
+        #[cfg(feature = "testing")]
+        cache.cache_miss_count.set(cache.cache_miss_count.get() + 1);
+        cache.entry_count_estimate.set(cache.entry_count_estimate.get() + 1);
+        entry.paragraphs = Some(paragraphs);
+        entry.line_breaking = None;
+    }
     let paragraphs = entry.paragraphs.take().unwrap_or_default();
     CachedParagraphsGuard {
         paragraphs: Some(paragraphs),
