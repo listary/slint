@@ -251,7 +251,9 @@ impl winit::application::ApplicationHandler<SlintEvent> for EventLoopState {
                 .values()
                 .filter_map(|w| w.upgrade())
             {
-                if w.window().has_active_animations() {
+                // LISTARY PATCH (T-14): the flag is global; only a window whose last draw
+                // evaluated an animation gets the extra redraw.
+                if w.window().has_active_animations() && w.animated_in_last_draw.get() {
                     w.request_redraw();
                 }
             }

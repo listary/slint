@@ -381,6 +381,8 @@ pub struct WinitWindowAdapter {
     window: corelib::api::Window,
     pub(crate) self_weak: Weak<Self>,
     pending_redraw: Cell<bool>,
+    // LISTARY PATCH (T-14): whether this window's last draw evaluated an animation.
+    pub(crate) animated_in_last_draw: Cell<bool>,
     constraints: Cell<corelib::window::LayoutConstraints>,
     /// Indicates if the window is shown, from the perspective of the API user.
     shown: Cell<WindowVisibility>,
@@ -478,6 +480,7 @@ impl WinitWindowAdapter {
             window: corelib::api::Window::new(self_weak.clone() as _),
             self_weak: self_weak.clone(),
             pending_redraw: Default::default(),
+            animated_in_last_draw: Cell::new(false),
             constraints: Default::default(),
             shown: Default::default(),
             window_level: Default::default(),
@@ -761,7 +764,12 @@ impl WinitWindowAdapter {
             self.set_visibility(WindowVisibility::ShownFirstTime)?;
         }
 
-        {
+        // LISTARY PATCH (R-89): skipped for atomically-presented windows. They carry no
+        // caption and therefore no caption buttons, so the workaround has nothing to fix;
+        // what it *would* do is change a winit flag on an already-mapped window, and every
+        // flag change rewrites both style words (see `map_native_window`) — taking
+        // `WS_EX_LAYERED` off a window whose entire content lives in the layered surface.
+        if self.renderer.atomic_presentation().is_none() {
             // Workaround for winit bug #2990
             // Non-resizable windows can still contain a maximize button,
             // so we'd have to additionally remove the button.
@@ -839,6 +847,16 @@ impl WinitWindowAdapter {
 
     /// Draw the items of the specified `component` in the given window.
     pub fn draw(&self) -> Result<(), PlatformError> {
+        // LISTARY PATCH (T-14): `has_active_animations()` is global, so remember whether *this*
+        // draw evaluated an animation; `about_to_wait` gives its extra redraw only to such windows.
+        // If another window already raised the flag this tick, the draw cannot be attributed.
+        let animating_before = self.window().has_active_animations();
+        let result = self.draw_frame();
+        self.animated_in_last_draw.set(!animating_before && self.window().has_active_animations());
+        result
+    }
+
+    fn draw_frame(&self) -> Result<(), PlatformError> {
         if matches!(self.shown.get(), WindowVisibility::Hidden) {
             return Ok(()); // caller bug, doesn't make sense to call draw() when not shown
         }
@@ -963,6 +981,16 @@ impl WinitWindowAdapter {
     // Requests for the window to be resized. Returns true if the window was resized immediately,
     // or if it will be resized later (false).
     fn resize_window(&self, size: winit::dpi::Size) -> Result<bool, PlatformError> {
+        // LISTARY PATCH (R-89): same deferral as `set_position`. The size becomes real in
+        // the next `UpdateLayeredWindow`; what has to happen *now* is telling Slint about
+        // it, so the frame that gets presented is already laid out at the new size. This is
+        // the `WinitWindowOrNone::None` arm's shape (dispatch the resize ourselves, report
+        // "done"), minus the attribute write.
+        if self.renderer.atomic_presentation().is_some() && self.winit_window().is_some() {
+            let scale_factor = self.window().scale_factor() as f64;
+            self.resize_event(size.to_physical(scale_factor))?;
+            return Ok(true);
+        }
         if platform_dictates_window_size() {
             // The platform's size wins: re-announce it so the window item snaps back to it.
             self.resize_event(physical_size_to_winit(self.size.get()))?;
@@ -1672,7 +1700,12 @@ impl WinitWindowAdapter {
             // Pre-render the first frame before mapping the window to avoid a flash of
             // uninitialized VRAM on X11 (no background_pixmap). Skipped on Wayland, where
             // rendering before the initial configure makes the compositor mis-size the window.
-            if !self.first_frame_presented.get() && !self.shared_backend_data.is_wayland {
+            // LISTARY PATCH (R-89): also skipped for an atomically-presented window, which
+            // presents in `map_native_window` before every map, the first one included.
+            if !self.first_frame_presented.get()
+                && !self.shared_backend_data.is_wayland
+                && self.renderer.atomic_presentation().is_none()
+            {
                 let _ = self.draw();
                 #[cfg(target_os = "macos")]
                 if !self.first_frame_presented.get() {
@@ -1681,7 +1714,7 @@ impl WinitWindowAdapter {
                 }
             }
 
-            winit_window.set_visible(true);
+            self.map_native_window(true);
 
             // X11 and Windows discard what is drawn into a window that isn't mapped,
             // which the buffer age a software surface reports doesn't account for.
@@ -1733,7 +1766,7 @@ impl WinitWindowAdapter {
                 // on wayland implies making it visible. Unfortunately, winit won't allow creating a window on wayland
                 // that's not visible.
             } else {
-                self.winit_window_or_none.borrow().set_visible(false);
+                self.map_native_window(false);
             }
 
             /* FIXME:
@@ -1746,6 +1779,71 @@ impl WinitWindowAdapter {
             self.reveal_on_first_frame.take();
 
             Ok(())
+        }
+    }
+
+    /// LISTARY PATCH (R-89): **the one place this adapter maps or unmaps its window.**
+    ///
+    /// For an ordinary window this is winit's `set_visible`. For an atomically-presented
+    /// window it is a raw `ShowWindow` inside the renderer, because winit's `set_visible`
+    /// goes through `WindowFlags::apply_diff`, and *any* flag change there recomputes both
+    /// style words from winit's own cached flags (`winit-0.30.13` `window_state.rs:390`) —
+    /// which would put `WS_CAPTION` back and take `WS_EX_LAYERED` away, i.e. undo the two
+    /// bits the mode is built on and blank the window until its next present. Keeping
+    /// winit's flags untouched after birth is cheaper and more honest than re-asserting the
+    /// style after every winit call that might have perturbed it.
+    fn map_native_window(&self, visible: bool) {
+        if let Some(atomic) = self.renderer.atomic_presentation() {
+            // LISTARY PATCH (R-89): present before mapping, on every show, the
+            // first one included (`set_visibility` leaves its first-frame pre-render to this
+            // branch). Mapping a layered window shows whatever its last `UpdateLayeredWindow`
+            // left there, and Windows sends it no paint message, so a re-shown window would
+            // otherwise come up with its previous frame: old position, old size, old content.
+            // The window is `Shown` by now, so `draw` renders.
+            //
+            // `set_visibility` also arms a resize catch-up, which the next `draw_frame`
+            // answers with the native window's size (`surface_size`); it exists for platforms
+            // that drop a resize event (macOS). A window that has presented before has no such
+            // gap: `resize_window` hands the size to Slint synchronously and records it in
+            // `self.size`, while the native window is the one that lags, because its size only
+            // changes inside the next present. The registered size is the true one, and the
+            // catch-up would put back the old size that the host replaced while the window was
+            // hidden, so a re-show drops it.
+            //
+            // A window that has never presented keeps it. Its first map normally comes from
+            // `ensure_window` right after creation, and there the native window is the true one: it
+            // was just created at the requested size under the real scale factor, while `self.size`
+            // may still hold that size converted at the scale factor known before the window
+            // existed (1.0). The window item already uses the real one, and the software renderer
+            // checks the buffer against the item, not against `self.size` — at 150 % a 38-row
+            // buffer for a 750×57 item panics at startup. The catch-up brings `self.size` and the
+            // item in line with the native window before that first frame, and a window that has
+            // never presented has no old frame to bring back. The price is paid only by a window
+            // created hidden (shown and hidden before creation) that the host resizes before its
+            // first show: the catch-up puts the creation size back until the host sets a size
+            // again. Neither bar goes that way — both are warmed up by a show right at creation —
+            // and a stale size until the next resize is the failure to prefer over a panic.
+            if visible {
+                if self.first_frame_presented.get() {
+                    self.pending_resize_event_after_show.set(false);
+                }
+                if let Err(error) = self.draw() {
+                    i_slint_core::debug_log!(
+                        "atomic presentation could not present before mapping: {error}"
+                    );
+                }
+            } else if let WinitWindowOrNone::None(attributes) = &*self.winit_window_or_none.borrow()
+            {
+                // LISTARY PATCH (R-89): hidden before its native window exists. A
+                // `show()` before creation left `visible = true` in the pending attributes, and
+                // `ensure_window` maps the window it creates when that is set. The plain branch
+                // below clears it through `set_visible`; without this, show → hide before
+                // creation would come back shown once the event loop creates the window.
+                attributes.borrow_mut().visible = false;
+            }
+            atomic.set_mapped(visible);
+        } else {
+            self.winit_window_or_none.borrow().set_visible(visible);
         }
     }
 
@@ -1827,6 +1925,23 @@ impl WindowAdapter for WinitWindowAdapter {
     }
 
     fn set_position(&self, position: corelib::api::WindowPosition) {
+        // LISTARY PATCH (R-89): an atomically-presented window has exactly one on-screen
+        // call, and it is not this one. The origin is stashed and becomes real inside the
+        // next `UpdateLayeredWindow`, together with the size and the pixels — which is the
+        // whole point of the mode: "the geometry changed but the content did not catch up"
+        // stops being expressible. The redraw request is what guarantees a *pure* move
+        // (no content change) still reaches the screen.
+        if let Some(atomic) = self.renderer.atomic_presentation() {
+            let physical = match position {
+                corelib::api::WindowPosition::Physical(position) => position,
+                corelib::api::WindowPosition::Logical(position) => {
+                    position.to_physical(self.window().scale_factor())
+                }
+            };
+            atomic.stash_origin(physical.x, physical.y);
+            self.request_redraw();
+            return;
+        }
         let winit_pos = position_to_winit(&position);
         match &*self.winit_window_or_none.borrow() {
             WinitWindowOrNone::HasWindow { window, .. } => window.set_outer_position(winit_pos),

@@ -99,6 +99,34 @@ mod renderer {
             window_attributes: winit::window::WindowAttributes,
             window_adapter_weak: Weak<crate::winitwindowadapter::WinitWindowAdapter>,
         ) -> Result<Arc<winit::window::Window>, PlatformError>;
+
+        /// LISTARY PATCH (R-89): `Some` only for the atomic-presentation renderer
+        /// (`renderer/ulw.rs`). This is how the window adapter learns that this window's
+        /// geometry must NOT go to winit — see [`AtomicPresentation`].
+        fn atomic_presentation(&self) -> Option<&dyn AtomicPresentation> {
+            None
+        }
+    }
+
+    /// LISTARY PATCH (R-89): the surface behaviours an atomically-presented window needs
+    /// from its renderer. Kept unconditional (the trait method above returns it) while the
+    /// implementation is Windows + software-renderer only.
+    ///
+    /// A window in this mode has exactly one on-screen call — the
+    /// `UpdateLayeredWindow` inside its `render()` — so both of these are *deferrals*, not
+    /// alternative ways to reach the screen:
+    ///
+    /// * [`Self::stash_origin`] records where the next present must put the window;
+    /// * [`Self::set_mapped`] maps/unmaps without going through winit, which is what keeps
+    ///   winit's flag diffing (and its style rewrite) away from the window after birth.
+    ///
+    /// LISTARY PATCH (R-89): [`Self::set_next_map_activation`] leaves
+    /// `crate::atomic_presentation::show`'s choice for the next [`Self::set_mapped`], which
+    /// takes it whether it maps or unmaps.
+    pub trait AtomicPresentation {
+        fn stash_origin(&self, x: i32, y: i32);
+        fn set_next_map_activation(&self, activate: bool);
+        fn set_mapped(&self, visible: bool);
     }
 
     #[cfg(enable_femtovg_renderer)]
@@ -110,6 +138,105 @@ mod renderer {
     pub(crate) mod sw;
     #[cfg(feature = "renderer-vello")]
     pub(crate) mod vello;
+
+    // LISTARY PATCH (R-89): the atomic-presentation renderer. Windows-only (it is
+    // `UpdateLayeredWindow`), and it draws with the software renderer, so it rides the same
+    // feature as `sw`.
+    #[cfg(all(target_os = "windows", feature = "renderer-software"))]
+    pub(crate) mod ulw;
+}
+
+/// LISTARY PATCH (R-89) — **the product-facing surface of atomic presentation.**
+///
+/// Three functions (`arm_next_window`, `take_next_window`, `show`), the `ShowPath` that
+/// `show` returns, and one thread-local bit. Everything else about the mode lives in
+/// `renderer/ulw.rs`; read that file's header for the mechanism and the evidence.
+///
+/// The bit is the exact shape of `listary_ui::window_birth`'s "next window is born
+/// inactive" one-shot, and for the same reason: the hook that consumes it runs once per
+/// window inside `Platform::create_window_adapter`, and the only code that knows *which*
+/// window is being built is the call site building it. Arm immediately before
+/// `XxxWindow::new()`, and take the bit back unconditionally afterwards — a bit left armed
+/// by a failed construction (or by a backend that never creates winit windows, e.g. the
+/// testing backend) would be stolen by the *next* window, which is very likely somebody
+/// else's.
+pub mod atomic_presentation {
+    use std::cell::Cell;
+
+    thread_local! {
+        static NEXT_WINDOW_ATOMIC: Cell<bool> = const { Cell::new(false) };
+    }
+
+    /// Arm: the next winit window created on this thread renders through
+    /// `UpdateLayeredWindow` instead of the process-wide renderer.
+    pub fn arm_next_window() {
+        NEXT_WINDOW_ATOMIC.with(|armed| armed.set(true));
+    }
+
+    /// Consume the bit (read and clear). Called unconditionally by
+    /// `Backend::create_window_adapter`, and by the arming helper on the product side so a
+    /// window that never reached this backend cannot leak its bit forward.
+    #[must_use]
+    pub fn take_next_window() -> bool {
+        NEXT_WINDOW_ATOMIC.with(Cell::take)
+    }
+
+    /// LISTARY PATCH (R-89): **show an atomically-presented window and choose
+    /// whether this show activates it** — WPF's `Show()` with `ShowActivated = activate`.
+    ///
+    /// Slint's `Window::show()` takes no such choice, and winit's creation-time
+    /// `attributes.active` is not a per-show one. The window still goes through Slint's own
+    /// `show()`, so Slint's visibility, keep-alive and window count stay true; this only
+    /// leaves the choice for the one map that `show()` causes (`SW_SHOW` or `SW_SHOWNA`, see
+    /// `renderer/ulw.rs`). A plain `show()` on such a window does not activate.
+    ///
+    /// * Already shown: this is a plain `show()`, and nothing is activated — WPF's `Show()`
+    ///   on a visible window does not activate it either.
+    /// * Native window not created yet: the event loop maps it later and still uses this
+    ///   choice; a `hide()` in between drops it.
+    /// * Not an atomically-presented window: a plain `show()`, and the returned
+    ///   [`ShowPath`] says so, so that the caller can tell a window that should have been
+    ///   atomic (a bug on the product path) from another backend such as the testing one.
+    ///
+    /// `activate = true` is a request Windows can still refuse (the foreground lock applies
+    /// to `SW_SHOW` from a background process), so a summon that must take the foreground
+    /// keeps its explicit activation after this.
+    ///
+    /// # Errors
+    /// Slint's `show()` failed; the choice is dropped.
+    pub fn show(
+        window: &i_slint_core::api::Window,
+        activate: bool,
+    ) -> Result<ShowPath, i_slint_core::platform::PlatformError> {
+        let window_adapter = i_slint_core::window::WindowInner::from_pub(window).window_adapter();
+        let Some(adapter) = window_adapter
+            .internal(i_slint_core::InternalToken)
+            .and_then(|wa| (wa as &dyn core::any::Any).downcast_ref::<crate::WinitWindowAdapter>())
+        else {
+            return window.show().map(|()| ShowPath::PlainOtherBackend);
+        };
+        let Some(atomic) = adapter.renderer().atomic_presentation() else {
+            return window.show().map(|()| ShowPath::PlainWinit);
+        };
+        if matches!(adapter.visibility(), crate::winitwindowadapter::WindowVisibility::Hidden) {
+            atomic.set_next_map_activation(activate);
+        }
+        window.show().inspect_err(|_| atomic.set_next_map_activation(false))?;
+        Ok(ShowPath::Atomic)
+    }
+
+    /// Which way [`show`] showed the window. Only [`Self::Atomic`] carried the choice.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum ShowPath {
+        /// An atomically-presented window: the choice decides the map this show causes.
+        Atomic,
+        /// A winit window that is not atomically presented (it was never armed, or arming
+        /// degraded because the platform has no atomic renderer): a plain `show()`, which
+        /// activates or not by winit's creation-time `attributes.active`.
+        PlainWinit,
+        /// Another backend, such as the testing one: a plain `show()`.
+        PlainOtherBackend,
+    }
 }
 
 #[cfg(enable_accesskit)]
@@ -133,6 +260,24 @@ cfg_if::cfg_if! {
         const DEFAULT_RENDERER_NAME: &str = "Vello";
     } else {
         compile_error!("Please select a feature to build with the winit backend: `renderer-femtovg`, `renderer-skia`, `renderer-skia-opengl`, `renderer-skia-vulkan`, `renderer-software` or `renderer-vello`");
+    }
+}
+
+/// LISTARY PATCH (R-89): the atomic-presentation renderer, or `None` where the mode does
+/// not exist (non-Windows, or a build without the software renderer). Deliberately NOT part
+/// of the `LISTARY_X_RENDERER` / `renderer_name` selection: this is a **per-window** choice
+/// made by the window's own construction site, and it is orthogonal to the process-global
+/// renderer the 260820 ruling selects for every other window.
+fn atomic_renderer(
+    _shared_backend_data: &Rc<SharedBackendData>,
+) -> Option<Box<dyn WinitCompatibleRenderer>> {
+    #[cfg(all(target_os = "windows", feature = "renderer-software"))]
+    {
+        renderer::ulw::WinitUlwRenderer::new_suspended(_shared_backend_data).ok()
+    }
+    #[cfg(not(all(target_os = "windows", feature = "renderer-software")))]
+    {
+        None
     }
 }
 
@@ -896,6 +1041,24 @@ impl i_slint_core::platform::Platform for Backend {
 
         if let Some(hook) = &self.window_attributes_hook {
             attrs = hook(attrs);
+        }
+
+        // LISTARY PATCH (R-89): the bit is taken **unconditionally**, before anything can
+        // return early — see `atomic_presentation`'s header for why a leaked bit is the
+        // real defect. `atomic_renderer` is `None` on every platform/feature combination
+        // where the mode does not exist, so an armed window degrades to the ordinary
+        // renderer rather than failing to open.
+        let wants_atomic_presentation = atomic_presentation::take_next_window();
+        if wants_atomic_presentation && let Some(renderer) = atomic_renderer(&self.shared_data) {
+            return Ok(WinitWindowAdapter::new(
+                self.shared_data.clone(),
+                renderer,
+                attrs,
+                #[cfg(any(enable_accesskit, muda))]
+                self.shared_data.event_loop_proxy.clone(),
+                #[cfg(all(muda, target_os = "macos"))]
+                self.muda_enable_default_menu_bar_bar,
+            ) as Rc<dyn WindowAdapter>);
         }
 
         let adapter = create_renderer(&self.shared_data).map_or_else(

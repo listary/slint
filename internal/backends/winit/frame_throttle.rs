@@ -8,7 +8,7 @@ use i_slint_core::timers::{Timer, TimerMode};
 #[cfg(target_vendor = "apple")]
 mod apple_display_link;
 
-use crate::winitwindowadapter::WinitWindowAdapter;
+use crate::winitwindowadapter::{WindowVisibility, WinitWindowAdapter};
 
 pub fn create_frame_throttle(
     window_adapter: Weak<WinitWindowAdapter>,
@@ -62,7 +62,19 @@ impl FrameThrottle for TimerBasedFrameThrottle {
             let Some(timer) = timer.upgrade() else { return };
             let Some(window_adapter) = window_adapter.upgrade() else { return };
 
-            let keep_running = window_adapter.pending_redraw();
+            // LISTARY PATCH (T-14): a hidden window gets no paint message, so its pending redraw
+            // never clears and this timer would run forever. Stop it; showing the window again
+            // clears the flag and repaints. A window hidden behind Slint's back with a plain
+            // `ShowWindow(SW_HIDE)` still counts as shown to Slint, so ask the OS as well (the
+            // hooked search bars used to hide that way; since 260924 they use Slint's own
+            // `hide()`, which the first condition already covers). An ordinary window gets a
+            // paint message when it is shown again, and that draws the pending frame.
+            let os_hidden = window_adapter
+                .winit_window()
+                .is_some_and(|window| window.is_visible() == Some(false));
+            let keep_running = window_adapter.pending_redraw()
+                && !matches!(window_adapter.visibility(), WindowVisibility::Hidden)
+                && !os_hidden;
 
             if timer.running() {
                 if !keep_running {
