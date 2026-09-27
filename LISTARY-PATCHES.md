@@ -271,10 +271,10 @@ winit 的 flag;`show()` 顺带的 `update_window_properties` 只在值变了时�
 |---|---|
 | `AGENTS.md` 呈现栈单一权威条目 | 分叉清单 + 本节 + P0-14 升版批 |
 | `listary_ui::backend::configure_renderer_backend` 文档块(R-31 阶梯) | 本节 |
-| `listary-ui/tests/slint_discipline.rs` 的依赖来源检查 | 分叉位置见 `app/vendor/README.md`,重打配方 = 本节 §三 |
+| `listary-ui/tests/slint_discipline.rs` 的依赖来源检查 | 分叉位置见 `app/upstream-forks.md`,重打配方 = 本节 §三 |
 | `listary_ui::window_birth::born_atomic_bar`(搜索条与菜单层窗的出生式) | 本节 §二点五 |
 | `cicd/lint/lint-a-form-no-dropshadow.mjs`(gate 第 11 检) | 本节 §二点五 的 drop-shadow 纪律 |
-| `app/Cargo.toml` 的 `[patch.crates-io]` | 注释指 `app/vendor/README.md` |
+| `app/Cargo.toml` 的 `[patch.crates-io]` | 注释指 `app/upstream-forks.md` |
 | tracker `P0-14`(slint 升版并批)| 分叉重打配方 = 本节 §三 |
 | 渲染器决策记录 `docs/specs/260731-rust-migration/260820-renderer-gl-default/spec.md` | 合成模式功能的退役记录 |
 | 分叉内部改动 | 均带 `LISTARY PATCH` 注释,`grep -rn "LISTARY PATCH"` 一次列全 |
