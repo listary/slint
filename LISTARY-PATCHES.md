@@ -4,7 +4,7 @@
 
 ## `i-slint-core`（`internal/core`）
 
-`internal/core` 相对 v1.18.1 只改了一处：文字排版缓存清扫时，保留缓存条目和它的依赖追踪器，只丢掉排好的字形。v1.18.1 的 `internal/core` 与 crates.io 上 `i-slint-core` 1.18.1 发布包的源码逐文件相同（差别只在发布时规范化的 `Cargo.toml`、cargo 生成的元数据和展开的许可证符号链接）。
+`internal/core` 相对 v1.18.1 除了下文「上游 PR 回移」那一节，只改了一处：文字排版缓存清扫时，保留缓存条目和它的依赖追踪器，只丢掉排好的字形。v1.18.1 的 `internal/core` 与 crates.io 上 `i-slint-core` 1.18.1 发布包的源码逐文件相同（差别只在发布时规范化的 `Cargo.toml`、cargo 生成的元数据和展开的许可证符号链接）。
 
 ### 问题
 
@@ -27,7 +27,7 @@
 
 内存上限从「最近两帧用过的条目」变成「每个还活着的文字元素留一个小追踪器，加上最近两帧的字形」。元素所在组件销毁时，条目照旧由 `component_destroyed` 删掉。
 
-与 v1.18.1 的差别：`git diff v1.18.1 -- internal/core` 应只列出这两个文件。
+与 v1.18.1 的差别：`git diff v1.18.1 -- internal/core` 应只列出这两个文件（回移那一节的改动除外）。
 
 ### 测试
 
@@ -45,7 +45,7 @@
 
 ## `i-slint-renderer-software`（`internal/renderers/software`）
 
-`internal/renderers/software` 相对 v1.18.1 只改了一处：局部重绘时，`Path` 只画在本次要重画的区域里。
+`internal/renderers/software` 相对 v1.18.1 除了下文「上游 PR 回移」那一节，只改了一处：局部重绘时，`Path` 只画在本次要重画的区域里。
 
 ### 问题
 
@@ -60,7 +60,7 @@
 - `path.rs`：`render_filled_path`、`render_stroked_path` 多收一个重画区域。遮罩照旧按整个路径生成一次，写入像素时只走裁剪框和重画区域的交集，按 `region_line_ranges` 合并后的行区间逐行写，和 `foreach_ranges` 一样。重画区域的矩形可以互相重叠（`internal/core/partial_renderer.rs` 的 `DirtyRegion` 不保证不重叠），合并后每个像素只混合一次；逐个矩形各画一次会让重叠处的半透明路径和抗锯齿边缘混合两遍、颜色变深。
 - `lib.rs`：`RenderToBuffer` 的两个路径函数把自己的 `dirty_region` 传下去。
 
-与 v1.18.1 的差别：`git diff v1.18.1 -- internal/renderers/software` 应只列出这两个文件。
+与 v1.18.1 的差别：`git diff v1.18.1 -- internal/renderers/software` 应只列出这两个文件（回移那一节的改动除外）。
 
 ### 测试
 
@@ -70,6 +70,47 @@
 ### 升级
 
 升级 Slint 时先看上游的 `RenderToBuffer` 画路径时是否已按重画区域裁剪；已经裁剪的，就去掉这处补丁。上面两条测试照常要过。
+
+## 上游 PR 回移：软件渲染器画 `drop-shadow-*`（slint-ui/slint#13758）
+
+v1.18.1 的软件渲染器不画 `drop-shadow-*`（`draw_box_shadow` 是空的），Listary 只能把每处阴影烘成九宫格图或叠几圈半透明圆角矩形来画。上游 PR [slint-ui/slint#13758](https://github.com/slint-ui/slint/pull/13758)「software: draw drop shadows」补上了它；这里把这个 PR 原样回移，**Slint 升到包含它的版本后删掉这一条**。
+
+回移时 PR 还没有合进上游 master，取的是 PR 头 `a81fbf6b654c6be9a5fd5ac2ebb7bf6d33cbcc17` 的三个提交，用 `git cherry-pick -x` 原样挑到本分支（作者照旧，提交说明末尾记着上游提交号），本节另起一个提交：
+
+| 上游提交 | 说明 |
+|---|---|
+| `05d8761f39dd8fc2b4a8931bc13cb8419b427439` | core: Move BoxShadowOptions out of the box-shadow-cache feature |
+| `eb00c6627942a8fbe61a440158e95e3697c8e04a` | software: keep rounded rectangle anti-aliasing independent of the clip |
+| `a81fbf6b654c6be9a5fd5ac2ebb7bf6d33cbcc17` | software: draw drop shadows |
+
+三个提交打到本分支没有冲突。和上面路径裁剪那处补丁同在 `software/lib.rs`，但互不相干：那处只改 `RenderToBuffer` 画路径的两个函数，阴影走的是新加的 `process_box_shadow`。整段回移不逐处打 `LISTARY PATCH` 标记，以本节和那三个提交为准。
+
+### 改了什么
+
+- `internal/core`：`BoxShadowOptions` 从 `graphics/boxshadowcache.rs`（只在 `box-shadow-cache` 特性下编译）挪到新文件 `graphics/boxshadow.rs`，软件渲染器不开那个特性也能用；新加 `drop_shadow_bounding_rect`，`items.rs` 的 `BoxShadow::bounding_rect` 改用它，算法不变。femtovg 和 skia 只跟着改了引用路径，画法不变。
+- `internal/renderers/software`：
+  - `draw_functions.rs`：阴影按「圆角矩形与高斯核的卷积」解析地逐行算，不生成、不缓存图片。离圆角够远的行用预先算好的一维横向曲线；圆角附近的行按 σ/4 切成横条再合并。正态分布函数用 Q15 定点表。
+  - `lib.rs`：`draw_box_shadow` 接上上面的画法，直接画屏、逐行、局部重绘三条路都走它；圆角矩形的抗锯齿不再随裁剪框变化（第二个提交）。
+  - `scene.rs`：逐行模式的场景里多一种命令。
+- 其余：文档里「软件渲染器不支持 `drop-shadow-*`」那句删掉；`builtin_elements.rs` 的属性说明改成「FemtoVG 和 Qt 不支持 spread」；新增截图测试 `drop-shadow-edge-cases` 及各渲染器的参考图，另两个阴影用例的参考图更新。
+
+### 在软件渲染器里的实际含义
+
+- `drop-shadow-blur`：σ = blur / 2（物理像素），实际再加上 1/12 像素² 的方差防锯齿：σ = √((blur/2)² + 1/12)。只画到形状外 blur（即 2σ）为止，和局部重绘用的 `bounding_rect` 一致。
+- `drop-shadow-offset-x/-y`、`drop-shadow-color`（含透明度，元素 `opacity` 照常乘上去）：支持。
+- `drop-shadow-spread`：支持，正负都可以；阴影的圆角是 `max(0, 圆角 + spread)`。
+- `border-radius` 四角不同：支持。
+- inset 阴影（`inner-shadow-*`）：不画。
+- 一个元素只有一组 `drop-shadow-*`；多层阴影要用多个元素叠。阴影也画在元素自身底下，元素不透明时被盖住，半透明时会透出来。
+
+### 测试
+
+- PR 自带的软件渲染器单元测试（`draw_functions.rs`、`lib.rs` 里 `box_shadow`/`drop_shadow` 开头的）和截图测试 `tests/screenshots`（含 `drop-shadow-edge-cases`、`drop-shadow-per-corner-radius`、`drop-shadow-spread`）。
+- 本分支原有的软件渲染器测试照常要过。
+
+### 升级
+
+升级 Slint 时看上游有没有合进 #13758（或同类改动）：合进了就去掉那三个提交和本节；没合进就从新版本标签拉新分支，把上表三个提交重新挑过去。挑过去要注意上游合并前可能还会改，以那时的 PR 为准。
 
 ## `i-slint-backend-winit` 1.18.1 —— 分叉说明（LANDING KIT）
 
