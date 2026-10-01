@@ -43,6 +43,34 @@
 
 升级 Slint 时先看上游是否已修：`TextLayoutCache::sweep` 如果不再删除带追踪器的条目，或者改由调用方在缓存外读取文字，就可以去掉这份分叉，改回 registry 版本。上面两条测试照常要过。如果还要保留分叉，从新版本的标签拉新分支，再把这两处改动打上去。
 
+## `i-slint-renderer-software`（`internal/renderers/software`）
+
+`internal/renderers/software` 相对 v1.18.1 只改了一处：局部重绘时，`Path` 只画在本次要重画的区域里。
+
+### 问题
+
+设置窗口命令页、动作页打开「添加」下拉菜单后，鼠标在菜单项上移动，菜单下面那几行列表的线条图标会浮到菜单上面。
+
+原因在 `lib.rs` 的 `RenderToBuffer`：局部重绘会重画所有和重画区域相交的元素。其他元素都经 `foreach_ranges` 只写重画区域里的像素；`process_filled_path` 和 `process_stroked_path` 却把 `Path` 画满它自己的裁剪框。鼠标移到某个菜单项上，只有那一项要重画，但它下面那行的图标与之相交，于是整个图标被重画，压在重画区域外、上一帧已经画好的菜单像素上。
+
+### 改动
+
+`lib.rs` 一个文件，`grep -n "LISTARY PATCH" internal/renderers/software/lib.rs` 可以列全：
+
+- 新增 `dirty_clips`：把 `Path` 的裁剪框和重画区域的每个矩形分别取交集。
+- `process_filled_path`、`process_stroked_path` 对每个交集各画一次。重画区域最多 3 个矩形，每次都按整个路径大小生成遮罩，所以一个路径最多多生成两次遮罩；界面里的线条图标都很小，代价可以忽略。
+
+与 v1.18.1 的差别：`git diff v1.18.1 -- internal/renderers/software` 应只列出 `lib.rs`。
+
+### 测试
+
+- 本分支 `internal/renderers/software/lib.rs` 的 `a_path_draws_only_inside_the_dirty_region`：重画区域只有左上角一小块时，填充和描边的路径都不能写到区域外，区域内照常画出。用原版 1.18.1 时两种都会写满整个路径。
+- Listary 仓库 `app/crates/listary-ui/tests/path_redraw_stays_in_dirty_region.rs`：最小窗口里一个 `Path` 图标被上层矩形盖住，只改上层一个小块的颜色后，图标不能透出来。
+
+### 升级
+
+升级 Slint 时先看上游的 `RenderToBuffer` 画路径时是否已按重画区域裁剪；已经裁剪的，就去掉这处补丁。上面两条测试照常要过。
+
 ## `i-slint-backend-winit` 1.18.1 —— 分叉说明（LANDING KIT）
 
 > 本节原是 Listary 仓库 `app/vendor/i-slint-backend-winit/PATCH-NOTES.md`,那时补丁以整包副本放在 Listary 仓库里;搬到本分支后内容照旧,只改了与位置有关的句子。下文 `app/`、`docs/`、`tools/`、`cicd/` 开头的路径都在 Listary 仓库。
