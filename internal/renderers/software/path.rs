@@ -3,8 +3,8 @@
 
 //! Path rendering support for the software renderer using zeno
 
-use super::PhysicalRect;
 use super::draw_functions::{PremultipliedRgbaColor, TargetPixel};
+use super::{PhysicalRect, PhysicalRegion};
 use alloc::vec;
 use alloc::vec::Vec;
 use zeno::{Cap, Fill, Join, Mask, Stroke, Style};
@@ -62,6 +62,7 @@ fn render_path_with_style<T: TargetPixel>(
     commands: &[Command],
     path_geometry: &PhysicalRect,
     clip_geometry: &PhysicalRect,
+    dirty_region: &PhysicalRegion,
     color: PremultipliedRgbaColor,
     style: zeno::Style,
     buffer: &mut impl crate::target_pixel_buffer::TargetPixelBuffer<TargetPixel = T>,
@@ -93,42 +94,62 @@ fn render_path_with_style<T: TargetPixel>(
     let path_x_start = path_geometry.origin.x as isize;
     let path_y_start = path_geometry.origin.y as isize;
 
-    // Apply the mask only within the clipped region
-    for screen_y in clip_y_start..clip_y_end {
-        let line = buffer.line_slice(screen_y);
-
-        // Calculate the y coordinate in the mask buffer
-        let mask_y = screen_y as isize - path_y_start;
-        if mask_y < 0 || mask_y >= path_height as isize {
-            continue;
+    // LISTARY PATCH: apply the mask only where the clip meets the dirty region. A partial
+    // redraw repaints every item that touches the dirty region; writing the whole clip drew the
+    // part of the path outside the region over what an earlier frame had painted above it. The
+    // region's rectangles may overlap, so walk its merged line ranges, as
+    // `RenderToBuffer::foreach_ranges` does for every other item: each pixel is blended once.
+    let mut ranges = Vec::new();
+    let mut band_start = clip_y_start;
+    while band_start < clip_y_end {
+        let Some(next) = crate::region_line_ranges(dirty_region, band_start as i16, &mut ranges)
+        else {
+            break;
+        };
+        let next = (next.max(0) as usize).min(clip_y_end);
+        if next <= band_start {
+            break;
         }
-
-        // Iterate the writable portion of the line directly to avoid indexing by loop variable
-        let line_slice = &mut line[clip_x_start..clip_x_end];
-        for (i, pixel) in line_slice.iter_mut().enumerate() {
-            let screen_x = clip_x_start + i;
-
-            // Calculate the x coordinate in the mask buffer
-            let mask_x = screen_x as isize - path_x_start;
-            if mask_x < 0 || mask_x >= path_width as isize {
+        for screen_y in band_start..next {
+            // Calculate the y coordinate in the mask buffer
+            let mask_y = screen_y as isize - path_y_start;
+            if mask_y < 0 || mask_y >= path_height as isize {
                 continue;
             }
+            let line = buffer.line_slice(screen_y);
+            for range in &ranges {
+                let x_start = (range.start.max(0) as usize).max(clip_x_start);
+                let x_end = (range.end.max(0) as usize).min(clip_x_end);
+                if x_start >= x_end {
+                    continue;
+                }
+                for (i, pixel) in line[x_start..x_end].iter_mut().enumerate() {
+                    let screen_x = x_start + i;
 
-            let mask_idx = (mask_y as usize) * path_width + (mask_x as usize);
-            let coverage = mask_buffer[mask_idx];
+                    // Calculate the x coordinate in the mask buffer
+                    let mask_x = screen_x as isize - path_x_start;
+                    if mask_x < 0 || mask_x >= path_width as isize {
+                        continue;
+                    }
 
-            if coverage > 0 {
-                // Scale all color components by coverage to maintain premultiplication
-                let coverage_factor = coverage as u16;
-                let alpha_color = PremultipliedRgbaColor {
-                    red: ((color.red as u16 * coverage_factor) / 255) as u8,
-                    green: ((color.green as u16 * coverage_factor) / 255) as u8,
-                    blue: ((color.blue as u16 * coverage_factor) / 255) as u8,
-                    alpha: ((color.alpha as u16 * coverage_factor) / 255) as u8,
-                };
-                T::blend(pixel, alpha_color);
+                    let mask_idx = (mask_y as usize) * path_width + (mask_x as usize);
+                    let coverage = mask_buffer[mask_idx];
+
+                    if coverage > 0 {
+                        // Scale all color components by coverage to maintain premultiplication
+                        let coverage_factor = coverage as u16;
+                        let alpha_color = PremultipliedRgbaColor {
+                            red: ((color.red as u16 * coverage_factor) / 255) as u8,
+                            green: ((color.green as u16 * coverage_factor) / 255) as u8,
+                            blue: ((color.blue as u16 * coverage_factor) / 255) as u8,
+                            alpha: ((color.alpha as u16 * coverage_factor) / 255) as u8,
+                        };
+                        T::blend(pixel, alpha_color);
+                    }
+                }
             }
         }
+        band_start = next;
     }
 }
 
@@ -137,12 +158,14 @@ fn render_path_with_style<T: TargetPixel>(
 /// * `commands` - The path commands to render
 /// * `path_geometry` - The full bounding box of the path in screen coordinates
 /// * `clip_geometry` - The clipped region where the path should be rendered (intersection of path and clip)
+/// * `dirty_region` - LISTARY PATCH: the region being redrawn; nothing outside it is written
 /// * `color` - The color to render the path
 /// * `buffer` - The target pixel buffer
 pub fn render_filled_path<T: TargetPixel>(
     commands: &[Command],
     path_geometry: &PhysicalRect,
     clip_geometry: &PhysicalRect,
+    dirty_region: &PhysicalRegion,
     color: PremultipliedRgbaColor,
     buffer: &mut impl crate::target_pixel_buffer::TargetPixelBuffer<TargetPixel = T>,
 ) {
@@ -150,6 +173,7 @@ pub fn render_filled_path<T: TargetPixel>(
         commands,
         path_geometry,
         clip_geometry,
+        dirty_region,
         color,
         zeno::Style::Fill(Fill::NonZero),
         buffer,
@@ -161,6 +185,7 @@ pub fn render_filled_path<T: TargetPixel>(
 /// * `commands` - The path commands to render
 /// * `path_geometry` - The full bounding box of the path in screen coordinates
 /// * `clip_geometry` - The clipped region where the path should be rendered (intersection of path and clip)
+/// * `dirty_region` - LISTARY PATCH: the region being redrawn; nothing outside it is written
 /// * `color` - The color to render the path
 /// * `stroke_width` - The width of the stroke
 /// * `buffer` - The target pixel buffer
@@ -168,6 +193,7 @@ pub fn render_stroked_path<T: TargetPixel>(
     commands: &[Command],
     path_geometry: &PhysicalRect,
     clip_geometry: &PhysicalRect,
+    dirty_region: &PhysicalRegion,
     color: PremultipliedRgbaColor,
     stroke_width: f32,
     stroke_line_cap: i_slint_core::items::LineCap,
@@ -189,5 +215,13 @@ pub fn render_stroked_path<T: TargetPixel>(
         })
         .miter_limit(stroke_miter_limit);
     let style = Style::Stroke(stroke);
-    render_path_with_style(commands, path_geometry, clip_geometry, color, style, buffer);
+    render_path_with_style(
+        commands,
+        path_geometry,
+        clip_geometry,
+        dirty_region,
+        color,
+        style,
+        buffer,
+    );
 }

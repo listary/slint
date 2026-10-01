@@ -2000,9 +2000,14 @@ impl<B: target_pixel_buffer::TargetPixelBuffer> ProcessScene for RenderToBuffer<
         color: PremultipliedRgbaColor,
     ) {
         // LISTARY PATCH: draw only inside the dirty region, like every other item.
-        for clip in dirty_clips(&self.dirty_region, &clip_geometry) {
-            path::render_filled_path(&commands, &path_geometry, &clip, color, self.buffer);
-        }
+        path::render_filled_path(
+            &commands,
+            &path_geometry,
+            &clip_geometry,
+            &self.dirty_region,
+            color,
+            self.buffer,
+        );
     }
 
     #[cfg(feature = "path")]
@@ -2018,43 +2023,27 @@ impl<B: target_pixel_buffer::TargetPixelBuffer> ProcessScene for RenderToBuffer<
         stroke_miter_limit: f32,
     ) {
         // LISTARY PATCH: draw only inside the dirty region, like every other item.
-        for clip in dirty_clips(&self.dirty_region, &clip_geometry) {
-            path::render_stroked_path(
-                &commands,
-                &path_geometry,
-                &clip,
-                color,
-                stroke_width,
-                stroke_line_cap,
-                stroke_line_join,
-                stroke_miter_limit,
-                self.buffer,
-            );
-        }
+        path::render_stroked_path(
+            &commands,
+            &path_geometry,
+            &clip_geometry,
+            &self.dirty_region,
+            color,
+            stroke_width,
+            stroke_line_cap,
+            stroke_line_join,
+            stroke_miter_limit,
+            self.buffer,
+        );
     }
 }
 
-/// LISTARY PATCH: the parts of `clip` that lie in `dirty_region`.
-///
-/// A partial redraw repaints every item that touches the dirty region. The other items
-/// only write inside the region (`RenderToBuffer::foreach_ranges`), but a path used to fill
-/// its whole clip, so the part of a path outside the region was painted over whatever had
-/// been drawn above it in an earlier frame, such as a menu opened over a list of icons.
-#[cfg(feature = "path")]
-fn dirty_clips<'a>(
-    dirty_region: &'a PhysicalRegion,
-    clip: &'a PhysicalRect,
-) -> impl Iterator<Item = PhysicalRect> + 'a {
-    dirty_region.iter_box().filter_map(|dirty| dirty.to_rect().intersection(clip))
-}
-
-/// LISTARY PATCH: a path redrawn in a partial frame writes only inside the dirty region, for a
-/// fill and for a stroke.
+/// LISTARY PATCH: a path redrawn in a partial frame writes only inside the dirty region, and
+/// blends each pixel once where the region's rectangles overlap, for a fill and for a stroke.
 #[cfg(feature = "path")]
 #[test]
 fn a_path_draws_only_inside_the_dirty_region() {
     const SIZE: i16 = 40;
-    const DIRTY: i16 = 10;
     let corner = |x: i16, y: i16| zeno::Vector::new(x as f32, y as f32);
     let square = alloc::vec![
         path::Command::MoveTo(corner(0, 0)),
@@ -2064,19 +2053,24 @@ fn a_path_draws_only_inside_the_dirty_region() {
         path::Command::Close,
     ];
     let geometry = PhysicalRect::new(euclid::point2(0, 0), euclid::size2(SIZE, SIZE));
-    let red = PremultipliedRgbaColor { red: 255, green: 0, blue: 0, alpha: 255 };
-    let mut dirty_region = PhysicalRegion::default();
-    dirty_region.rectangles[0] =
-        euclid::Box2D::from_origin_and_size(euclid::point2(0, 0), euclid::size2(DIRTY, DIRTY));
-    dirty_region.count = 1;
-
-    for stroke in [false, true] {
+    // Half-transparent, so a pixel blended twice comes out darker than one blended once.
+    let color = PremultipliedRgbaColor { red: 128, green: 0, blue: 0, alpha: 128 };
+    let rgba = |p: PremultipliedRgbaColor| (p.red, p.green, p.blue, p.alpha);
+    let rect = |x: i16, y: i16, w: i16, h: i16| {
+        euclid::Box2D::from_origin_and_size(euclid::point2(x, y), euclid::size2(w, h))
+    };
+    let draw = |rectangles: &[euclid::Box2D<i16, PhysicalPx>], stroke: bool| {
+        let mut dirty_region = PhysicalRegion::default();
+        for (slot, r) in dirty_region.rectangles.iter_mut().zip(rectangles) {
+            *slot = *r;
+        }
+        dirty_region.count = rectangles.len();
         let mut pixels = alloc::vec![PremultipliedRgbaColor::default(); (SIZE * SIZE) as usize];
         let mut buffer = TargetPixelSlice { data: &mut pixels, pixel_stride: SIZE as usize };
         let mut renderer = RenderToBuffer {
             buffer: &mut buffer,
             dirty_range_cache: Vec::new(),
-            dirty_region: dirty_region.clone(),
+            dirty_region,
             scale_factor: ScaleFactor::new(1.0),
         };
         if stroke {
@@ -2084,28 +2078,32 @@ fn a_path_draws_only_inside_the_dirty_region() {
                 geometry,
                 geometry,
                 square.clone(),
-                red,
-                4.0,
+                color,
+                8.0,
                 i_slint_core::items::LineCap::Butt,
                 i_slint_core::items::LineJoin::Miter,
                 4.0,
             );
         } else {
-            renderer.process_filled_path(geometry, geometry, square.clone(), red);
+            renderer.process_filled_path(geometry, geometry, square.clone(), color);
         }
+        pixels
+    };
 
+    for stroke in [false, true] {
+        let whole = draw(&[rect(0, 0, SIZE, SIZE)], stroke);
+        // Two rectangles overlapping on 2..6 × 2..6; together they cover 0..10 × 0..10 minus
+        // two corners.
+        let dirty = draw(&[rect(0, 0, 6, 6), rect(2, 2, 8, 8)], stroke);
         for y in 0..SIZE {
             for x in 0..SIZE {
-                if x >= DIRTY || y >= DIRTY {
-                    let pixel = pixels[(y * SIZE + x) as usize];
-                    assert_eq!(pixel.alpha, 0, "stroke={stroke}: drawn outside at {x},{y}");
-                }
+                let inside = (x < 6 && y < 6) || ((2..10).contains(&x) && (2..10).contains(&y));
+                let at = (y * SIZE + x) as usize;
+                let expected = if inside { rgba(whole[at]) } else { (0, 0, 0, 0) };
+                assert_eq!(rgba(dirty[at]), expected, "stroke={stroke}: wrong pixel at {x},{y}");
             }
         }
-        assert!(
-            pixels[0].alpha > 0,
-            "stroke={stroke}: the dirty part of the path must still be drawn"
-        );
+        assert!(dirty[0].alpha > 0, "stroke={stroke}: the dirty part of the path must be drawn");
     }
 }
 

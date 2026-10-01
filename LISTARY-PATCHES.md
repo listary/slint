@@ -51,20 +51,20 @@
 
 设置窗口命令页、动作页打开「添加」下拉菜单后，鼠标在菜单项上移动，菜单下面那几行列表的线条图标会浮到菜单上面。
 
-原因在 `lib.rs` 的 `RenderToBuffer`：局部重绘会重画所有和重画区域相交的元素。其他元素都经 `foreach_ranges` 只写重画区域里的像素；`process_filled_path` 和 `process_stroked_path` 却把 `Path` 画满它自己的裁剪框。鼠标移到某个菜单项上，只有那一项要重画，但它下面那行的图标与之相交，于是整个图标被重画，压在重画区域外、上一帧已经画好的菜单像素上。
+原因在 `RenderToBuffer`：局部重绘会重画所有和重画区域相交的元素。其他元素都经 `foreach_ranges` 只写重画区域里的像素；`process_filled_path` 和 `process_stroked_path` 却把 `Path` 画满它自己的裁剪框。鼠标移到某个菜单项上，只有那一项要重画，但它下面那行的图标与之相交，于是整个图标被重画，压在重画区域外、上一帧已经画好的菜单像素上。
 
 ### 改动
 
-`lib.rs` 一个文件，`grep -n "LISTARY PATCH" internal/renderers/software/lib.rs` 可以列全：
+两个文件，每处都有 `LISTARY PATCH` 注释，`grep -rn "LISTARY PATCH" internal/renderers/software/` 可以列全：
 
-- 新增 `dirty_clips`：把 `Path` 的裁剪框和重画区域的每个矩形分别取交集。
-- `process_filled_path`、`process_stroked_path` 对每个交集各画一次。重画区域最多 3 个矩形，每次都按整个路径大小生成遮罩，所以一个路径最多多生成两次遮罩；界面里的线条图标都很小，代价可以忽略。
+- `path.rs`：`render_filled_path`、`render_stroked_path` 多收一个重画区域。遮罩照旧按整个路径生成一次，写入像素时只走裁剪框和重画区域的交集，按 `region_line_ranges` 合并后的行区间逐行写，和 `foreach_ranges` 一样。重画区域的矩形可以互相重叠（`internal/core/partial_renderer.rs` 的 `DirtyRegion` 不保证不重叠），合并后每个像素只混合一次；逐个矩形各画一次会让重叠处的半透明路径和抗锯齿边缘混合两遍、颜色变深。
+- `lib.rs`：`RenderToBuffer` 的两个路径函数把自己的 `dirty_region` 传下去。
 
-与 v1.18.1 的差别：`git diff v1.18.1 -- internal/renderers/software` 应只列出 `lib.rs`。
+与 v1.18.1 的差别：`git diff v1.18.1 -- internal/renderers/software` 应只列出这两个文件。
 
 ### 测试
 
-- 本分支 `internal/renderers/software/lib.rs` 的 `a_path_draws_only_inside_the_dirty_region`：重画区域只有左上角一小块时，填充和描边的路径都不能写到区域外，区域内照常画出。用原版 1.18.1 时两种都会写满整个路径。
+- 本分支 `internal/renderers/software/lib.rs` 的 `a_path_draws_only_inside_the_dirty_region`：半透明的填充和描边路径，重画区域是左上角两块互相重叠的矩形。区域内每个像素要和整幅重画时完全相同（重叠处只混合一次），区域外一个像素都不能写。用原版 1.18.1 时会写到区域外；改成逐个矩形各画一次时，重叠处会和整幅重画不同。
 - Listary 仓库 `app/crates/listary-ui/tests/path_redraw_stays_in_dirty_region.rs`：最小窗口里一个 `Path` 图标被上层矩形盖住，只改上层一个小块的颜色后，图标不能透出来。
 
 ### 升级
