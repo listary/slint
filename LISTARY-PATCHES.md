@@ -125,7 +125,7 @@ v1.18.1 的软件渲染器不画 `drop-shadow-*`（`draw_box_shadow` 是空的�
 版本号保持 `1.18.1`,通过 `[patch.crates-io]` 顶替 registry 版本,锁文件里不出现第二个
 版本,`slint = "=1.18.1"` 的精确钉版纪律不受影响。与上游不同的文件只有 `lib.rs`、
 `winitwindowadapter.rs`、`event_loop.rs`、`frame_throttle.rs`、`renderer/sw.rs` 和新增的
-`renderer/ulw.rs`,共 28 处 `LISTARY PATCH` 标记;其余文件与上游 1.18.1 逐字相同。
+`renderer/ulw.rs`,共 29 处 `LISTARY PATCH` 标记;其余文件与上游 1.18.1 逐字相同。
 
 > **260907**:曾经还有第四处 —— 批 6 的 W1 二分诊断开关(`accesskit.rs`,260906),让
 > accesskit 适配器可以不建。二分矩阵跑完后它已删除,`accesskit.rs` 回到上游 1.17.1 的
@@ -150,7 +150,7 @@ v1.18.1 的软件渲染器不画 `drop-shadow-*`（`draw_box_shadow` 是空的�
 |---|---|
 | `renderer/ulw.rs`(**整份新增**,约 +400 行,无上游对应物) | **R-89 原子呈现**:软渲直写常驻 DIB → **一次 `UpdateLayeredWindow`**(位置 + 尺寸 + 整幅像素)。详见 §二点五 |
 | `lib.rs`(+约 130 行,`LISTARY PATCH (R-89)` 标记) | ① `WinitCompatibleRenderer::atomic_presentation()` 默认方法 + `AtomicPresentation` trait(几何截存 / 映射旁路的窄口);② `pub mod atomic_presentation`(产品面:`arm_next_window` / `take_next_window` / `show(window, activate)`,后者是逐次决定激活与否的显示,返回走了哪条路 `ShowPath`,260924);③ `create_window_adapter` 里**无条件**消费武装位并挑 `WinitUlwRenderer`;④ `atomic_renderer()` 工厂(非 Windows / 无软渲特性时交 `None`,武装窗降级为普通窗而不是开不出来) |
-| `winitwindowadapter.rs`(+约 70 行,`LISTARY PATCH (R-89)` 标记) | ① `set_position` / `resize_window` 对 ULW 窗**不走 winit**(原点截存 + 同步派发 `Resized`);② `map_native_window` 单点(ULW 窗走裸 `ShowWindow`,绕开 winit 的 flag diff),每次显示先画一帧再映射;③ `ensure_window` 尾部的 `set_enabled_buttons` 对 ULW 窗跳过;④ `set_visibility` 的首帧预画对 ULW 窗跳过(交给 ②,免得首次显示画两遍);⑤ 原生窗建出来之前隐藏时,把待建属性的 `visible` 清回 false(普通窗经 `set_visible` 本来就清;不清的话建窗前「显示 → 隐藏」会在建窗时被重新映射) |
+| `winitwindowadapter.rs`(+约 70 行,`LISTARY PATCH (R-89)` 标记) | ① `set_position` / `resize_window` 对 ULW 窗**不走 winit**(原点截存 + 同步派发 `Resized`);② `map_native_window` 单点(ULW 窗走裸 `ShowWindow`,绕开 winit 的 flag diff),每次显示先画一帧再映射;③ `ensure_window` 尾部的 `set_enabled_buttons` 对 ULW 窗跳过;④ `set_visibility` 的首帧预画对 ULW 窗跳过(交给 ②,免得首次显示画两遍);⑤ 原生窗建出来之前隐藏时,把待建属性的 `visible` 清回 false(普通窗经 `set_visible` 本来就清;不清的话建窗前「显示 → 隐藏」会在建窗时被重新映射);⑥ 已经呈现过的 ULW 窗收到系统报来的 `Resized` 时不改 Slint 记的尺寸(见 §二点五「系统报来的尺寸」) |
 | `renderer/sw.rs`(约 +270 行,均带 `LISTARY PATCH (R-31)` 标记) | ① `NotifyingSoftwareRenderer` 包装 + 生命周期触发点,转发 `RendererSealed` 的全部方法;② 全量 present(废弃按脏矩形 present) |
 | `winitwindowadapter.rs`、`event_loop.rs`、`frame_throttle.rs`(`LISTARY PATCH (T-14)` 标记) | 隐藏窗停止帧定时器续跑、按窗补充重绘,见 §七 |
 
@@ -229,8 +229,9 @@ present 换内容(下一拍生效);DWM 按自己的节拍采样,采到两笔之�
 | **映射旁路**(`map_native_window` → `ulw.rs` 的 `set_mapped`) | ULW 窗的 show/hide 走裸 `ShowWindow`,不碰 winit 的 `WindowFlags` | winit 的 `apply_diff` 在**任何**flag 变化时都按自己的缓存重算两个 style 字(`winit-0.30.13 window_state.rs:390`)⇒ 把 CAPTION 加回来、把 LAYERED 拿掉,条当场变透明直到下一帧 |
 | **逐次决定激活**(`atomic_presentation::show(window, activate)` → trait 的 `set_next_map_activation` → `set_mapped`,260924) | 照 WPF 的 `ShowActivated`:每次显示由调用方决定,`true` 用 `SW_SHOW`,`false` 用 `SW_SHOWNA`(WPF `Window.nCmdForShow` 常态下的同一对命令)。选择只留给这次 `show()` 引起的那一次映射,`set_mapped` 不论显示还是隐藏都先把它取走;没人选的显示(普通 `show()`)不激活。已显示着的窗不重新激活。winit 建窗时的 `attributes.active` 不再参与:这种窗建时隐藏,之后从不经 winit 映射 | 旧版照抄了一句错的 winit 规则(「首次不激活、之后都 `SW_SHOW`」),第二次召唤起条就抢走用户正在打字的对话框的前台;而 winit 的真实行为(出生不激活就永远 `SW_SHOWNOACTIVATE`)是锁定版本的实现细节,不是可依赖的逐次显示契约。C# 的条同时要「自动展示不抢焦点」和「召唤激活」,产品负责人裁定照 WPF 做逐次接口 |
 | **映射前先画**(`map_native_window` 里,260924) | 每次显示(含首次,`set_visibility` 的首帧预画对 ULW 窗跳过)都先 `draw()` 一帧再 `ShowWindow`;重新显示时清掉 `set_visibility` 为 macOS 准备的尺寸补发:ULW 窗的尺寸由 `resize_window` 同步交给 Slint、记在 `self.size`,滞后的是原生窗(只在下一次 present 才变),补发读原生尺寸会把宿主隐藏期间设的新尺寸改回旧的。**刚建出来的窗第一次映射保留补发**(`first_frame_presented` 为假):那时原生窗才是对的,`self.size` 可能还是建窗前按缩放 1.0 记的,窗口元素却已按真实缩放布局;不补就按旧尺寸给缓冲区,150% 下软件渲染器断言失败(f63c91e5c 启动即 panic) | Windows 显示分层窗时不发绘制消息,映射出来的是**上一次**的 ULW 位图(旧位置、旧尺寸、旧内容),直到下一次属性变化才重画;上游只预画首帧 |
+| **系统报来的尺寸**(`Resized` 分支,261002) | 已经呈现过的 ULW 窗收到 winit 的 `Resized` 时,不再用它改 Slint 记的尺寸(`self.size`)。这种窗的尺寸只由宿主的 `set_size` 决定,原生窗只在下一次呈现时跟上,系统报来的只是某次呈现的回声。还没呈现过的窗照旧接受,那时原生窗才是对的(见上一行)。最小化的零尺寸那段不受影响:`resize_event` 本来就不收零尺寸,ULW 渲染器的 `occluded` 是空操作。跨显示器 DPI 变化时 winit 用 `SetWindowPos` 按新缩放改原生窗,这个尺寸也不再收;两条条在 `ScaleFactorChanged` 的下一回合按新缩放重设尺寸,菜单各层由 `rescale` 重新摆位,所以尺寸仍由宿主跟上 | 每次呈现改尺寸,系统都发 `WM_SIZE`;winit 在处理事件的回调里收到的事件先存着,回调返回后才投递。宿主在同一个回调里先显示(按旧尺寸画一帧再映射)、再 `set_size` 新尺寸,回调结束时投递来的旧尺寸就把新尺寸盖回去;之后宿主算出的尺寸不变,不会再设,窗口一直停在旧尺寸,原点却是按新尺寸摆的。实测:资源管理器浮动条第一次召唤时,结果在激活之前就发布,条停在只有输入框的 57 px(150%),结果列表被裁掉,再输入一个字才恢复 |
 
-映射这几块的行为测试:`listary-ui/tests/atomic_bar_visibility.rs`。ULW 窗经 Slint 显隐:普通
+映射这几块的行为测试:`listary-ui/tests/atomic_bar_visibility.rs`;「系统报来的尺寸」一行的回归测试是 `listary-ui/tests/atomic_bar_resize_after_show.rs`(显示后同一回合改尺寸,回合结束后原生窗是新尺寸,只要桌面门)。ULW 窗经 Slint 显隐:普通
 `show()` 和 `show(w, false)` 都不动前台;隐藏期间改的位置和颜色在 `show()` 返回时已经上屏;隐藏时
 事件循环几乎不醒;程序显示之后真鼠标点输入框,条拿到前台和键盘焦点;显示后走前台阶梯拿到前台;
 `show(w, true)` 拿到前台;原生窗建出来之前显示又隐藏的窗,建出来之后仍是隐藏的;产品的两条条照产品的暖机顺序第一次显示不崩、原生窗尺寸等于 Slint 记的尺寸(缩放不是 1.0 的机器才分得出修前修后)。开可见窗、抢前台到自己的测试窗、注入一次点击和一个字,走桌面门并另要

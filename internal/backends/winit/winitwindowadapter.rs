@@ -1317,7 +1317,21 @@ impl WinitWindowAdapter {
         match event {
             WinitWindowEvent::RedrawRequested => self.draw()?,
             WinitWindowEvent::Resized(size) => {
-                let resized = self.resize_event(size);
+                // LISTARY PATCH: an atomically-presented window that has presented keeps the
+                // size it was given. The native window only changes size inside a present, and
+                // the `WM_SIZE` that present sends can reach us late: winit holds events that
+                // arrive while a handler runs and delivers them after it returns. If the host
+                // called `set_size` in that same handler, the late event carries the size of the
+                // frame before it and would put that size back, and nothing sets it again when
+                // the host's size has not changed since. Before the first present the native
+                // window is the true one (see `map_native_window`), so the event still counts.
+                let resized = if self.renderer.atomic_presentation().is_some()
+                    && self.first_frame_presented.get()
+                {
+                    Ok(())
+                } else {
+                    self.resize_event(size)
+                };
 
                 // Entering fullscreen, maximizing or minimizing the window will
                 // trigger a resize event. We need to update the internal window
