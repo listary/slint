@@ -1023,6 +1023,14 @@ impl WinitWindowAdapter {
         }
     }
 
+    /// LISTARY PATCH: whether the size recorded here, not the size the system reports, is this
+    /// window's size: an atomically-presented window that has presented. Its native window only
+    /// takes the recorded size at the next present, so a size the system reports is at best an
+    /// echo of an earlier frame.
+    fn keeps_own_size(&self) -> bool {
+        self.renderer.atomic_presentation().is_some() && self.first_frame_presented.get()
+    }
+
     pub fn resize_event(&self, size: winit::dpi::PhysicalSize<u32>) -> Result<(), PlatformError> {
         self.pending_resize_event_after_show.set(false);
         if self.physical_size_before_scale_factor.get().is_some_and(|requested| requested != size) {
@@ -1325,13 +1333,8 @@ impl WinitWindowAdapter {
                 // frame before it and would put that size back, and nothing sets it again when
                 // the host's size has not changed since. Before the first present the native
                 // window is the true one (see `map_native_window`), so the event still counts.
-                let resized = if self.renderer.atomic_presentation().is_some()
-                    && self.first_frame_presented.get()
-                {
-                    Ok(())
-                } else {
-                    self.resize_event(size)
-                };
+                // A change of scale is taken in the `ScaleFactorChanged` arm.
+                let resized = if self.keeps_own_size() { Ok(()) } else { self.resize_event(size) };
 
                 // Entering fullscreen, maximizing or minimizing the window will
                 // trigger a resize event. We need to update the internal window
@@ -1584,6 +1587,17 @@ impl WinitWindowAdapter {
             }
             WinitWindowEvent::ScaleFactorChanged { scale_factor, mut inner_size_writer } => {
                 if std::env::var("SLINT_SCALE_FACTOR").is_err() {
+                    // LISTARY PATCH: a window that keeps its own size ignores the `Resized` winit
+                    // sends after resizing the native window for the new scale (see the
+                    // `Resized` arm), so it takes the new scale here instead: same logical size,
+                    // new physical size, set together with the scale. Without it, a frame drawn
+                    // before the host sets a size asks for the old logical size at the new scale
+                    // while the buffer still has the old physical size, which the software
+                    // renderer rejects when the scale grows.
+                    let kept_logical_size = self.keeps_own_size().then(|| {
+                        let old_scale_factor = WindowInner::from_pub(self.window()).scale_factor();
+                        self.size.get().to_logical(old_scale_factor)
+                    });
                     self.window().dispatch_event_with_result(
                         corelib::platform::WindowEvent::ScaleFactorChanged {
                             scale_factor: scale_factor as f32,
@@ -1591,6 +1605,11 @@ impl WinitWindowAdapter {
                     )?;
                     if let Some(physical) = self.physical_size_before_scale_factor.take() {
                         inner_size_writer.request_inner_size(physical).ok();
+                    }
+                    if let Some(logical) = kept_logical_size {
+                        self.resize_event(
+                            logical_size_to_winit(logical).to_physical::<u32>(scale_factor),
+                        )?;
                     }
                     // TODO: otherwise send a resize event or try to keep the logical size the same.
                 }
