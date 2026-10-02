@@ -1329,13 +1329,14 @@ impl WinitWindowAdapter {
                 // size it was given. Its native window only changes size inside a present, so a
                 // size the system reports is at best an echo of an earlier one, and it can arrive
                 // late: winit holds events that arrive while a handler runs and delivers them
-                // only after it. Creating the native window reports its creation sizes this way,
-                // and when the host creates the window, sets its real size and shows it within
-                // one handler, those sizes arrive after the real one and would put the creation
-                // size back; nothing sets it again while the host's size stays the same. Before
-                // the first present the native window is the true one (see `map_native_window`),
-                // so the event still counts. A change of scale is taken in the
-                // `ScaleFactorChanged` arm.
+                // later. Creating the native window, which happens when the loop is about to
+                // wait, reports its creation sizes this way, and they are delivered after the
+                // timers of the next turn. When the host sets the real size and shows the window
+                // from such a timer, those sizes arrive after the real one and would put the
+                // creation size back; nothing sets it again while the host's size stays the
+                // same. Before the first present the native window is the true one (see
+                // `map_native_window`), so the event still counts. A change of scale is taken in
+                // the `ScaleFactorChanged` arm.
                 let resized = if self.keeps_own_size() { Ok(()) } else { self.resize_event(size) };
 
                 // Entering fullscreen, maximizing or minimizing the window will
