@@ -10,6 +10,8 @@
 
 use crate::draw_functions::TargetPixel;
 use i_slint_core::lengths::PhysicalPx;
+#[allow(unused_imports)]
+use num_traits::Float;
 
 /// A rounded rectangle that clips what is drawn inside it, in physical pixels of the target.
 #[derive(Clone, Copy, Debug, PartialEq)]
