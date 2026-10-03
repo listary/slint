@@ -1315,6 +1315,20 @@ pub trait TargetPixel: Sized + Copy {
     fn background() -> Self {
         Self::from_rgb(0, 0, 0)
     }
+
+    /// LISTARY PATCH: mix `other` into this pixel: `coverage` 0 keeps this pixel, 255 takes
+    /// `other`. A rounded clip uses it at its curves. The default has no anti-aliasing: it takes
+    /// whichever of the two is closer.
+    fn mix(&mut self, other: Self, coverage: u8) {
+        if coverage >= 128 {
+            *self = other;
+        }
+    }
+}
+
+/// LISTARY PATCH: one channel of [`TargetPixel::mix`].
+fn mix_channel(this: u8, other: u8, coverage: u8) -> u8 {
+    ((this as u16 * (255 - coverage) as u16 + other as u16 * coverage as u16 + 127) / 255) as u8
 }
 
 impl TargetPixel for Rgb8Pixel {
@@ -1327,6 +1341,12 @@ impl TargetPixel for Rgb8Pixel {
 
     fn from_rgb(r: u8, g: u8, b: u8) -> Self {
         Self::new(r, g, b)
+    }
+
+    fn mix(&mut self, other: Self, coverage: u8) {
+        self.r = mix_channel(self.r, other.r, coverage);
+        self.g = mix_channel(self.g, other.g, coverage);
+        self.b = mix_channel(self.b, other.b, coverage);
     }
 }
 
@@ -1346,6 +1366,13 @@ impl TargetPixel for PremultipliedRgbaColor {
 
     fn background() -> Self {
         Self { red: 0, green: 0, blue: 0, alpha: 0 }
+    }
+
+    fn mix(&mut self, other: Self, coverage: u8) {
+        self.red = mix_channel(self.red, other.red, coverage);
+        self.green = mix_channel(self.green, other.green, coverage);
+        self.blue = mix_channel(self.blue, other.blue, coverage);
+        self.alpha = mix_channel(self.alpha, other.alpha, coverage);
     }
 }
 
@@ -1403,6 +1430,12 @@ impl TargetPixel for Rgb565Pixel {
 
     fn from_rgb(r: u8, g: u8, b: u8) -> Self {
         Self(((r as u16 & 0b11111000) << 8) | ((g as u16 & 0b11111100) << 3) | (b as u16 >> 3))
+    }
+
+    fn mix(&mut self, other: Self, coverage: u8) {
+        let mut this = Rgb8Pixel::from(*self);
+        this.mix(other.into(), coverage);
+        *self = this.into();
     }
 }
 
@@ -1467,6 +1500,12 @@ impl TargetPixel for Rgb565BigEndianPixel {
 
     fn from_rgb(r: u8, g: u8, b: u8) -> Self {
         Self(Rgb565Pixel::from_rgb(r, g, b).0.to_be())
+    }
+
+    fn mix(&mut self, other: Self, coverage: u8) {
+        let mut this = Rgb565Pixel(u16::from_be(self.0));
+        this.mix(Rgb565Pixel(u16::from_be(other.0)), coverage);
+        self.0 = this.0.to_be();
     }
 }
 

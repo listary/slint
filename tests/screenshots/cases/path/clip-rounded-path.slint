@@ -1,0 +1,49 @@
+// Copyright © SixtyFPS GmbH <info@slint.dev>
+// SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0
+
+// ROTATION_THRESHOLD=30  - Zeno anti-aliasing is slightly different in different rotation
+// SKIP_LINE_BY_LINE  - Path not implemented in line-by-line mode
+
+// A filled and a stroked path inside a rounded clip are cut at the curve (LISTARY PATCH in the
+// software renderer); outside the curves the black background shows.
+
+export component TestCase inherits Window {
+    width: 128px;
+    height: 64px;
+    background: black;
+
+    Rectangle {
+        x: 4px;
+        y: 4px;
+        width: 56px;
+        height: 56px;
+        clip: true;
+        border-radius: 20px;
+        Path {
+            x: -8px;
+            y: -8px;
+            width: 72px;
+            height: 72px;
+            commands: "M 0 0 L 100 0 L 100 100 L 0 100 Z";
+            fill: #00c000;
+        }
+    }
+
+    Rectangle {
+        x: 68px;
+        y: 4px;
+        width: 56px;
+        height: 56px;
+        clip: true;
+        border-radius: 20px;
+        Path {
+            x: 2px;
+            y: 2px;
+            width: 52px;
+            height: 52px;
+            commands: "M 0 0 L 100 0 L 100 100 L 0 100 Z";
+            stroke: #ffd000;
+            stroke-width: 6px;
+        }
+    }
+}

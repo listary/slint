@@ -24,6 +24,8 @@ pub struct SceneVectors {
     pub radial_gradients: Vec<RadialGradientCommand>,
     pub conic_gradients: Vec<ConicGradientCommand>,
     pub box_shadows: Vec<BoxShadowCommand>,
+    /// LISTARY PATCH: the sets of rounded clips that `SceneItem::rounded_clip` refers to.
+    pub rounded_clips: Vec<Vec<super::RoundedClip>>,
 }
 
 pub struct Scene {
@@ -263,6 +265,9 @@ pub struct SceneItem {
     pub size: PhysicalSize,
     // this is the order of the item from which it is in the item tree
     pub z: u16,
+    /// LISTARY PATCH: 0 when no rounded clip applies, otherwise one more than the index of
+    /// the clips in `SceneVectors::rounded_clips`.
+    pub rounded_clip: u16,
     pub command: SceneCommand,
 }
 
