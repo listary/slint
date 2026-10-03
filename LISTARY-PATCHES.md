@@ -112,6 +112,32 @@ v1.18.1 的软件渲染器不画 `drop-shadow-*`（`draw_box_shadow` 是空的�
 
 升级 Slint 时看上游有没有合进 #13758（或同类改动）：合进了就去掉那三个提交和本节；没合进就从新版本标签拉新分支，把上表三个提交重新挑过去。挑过去要注意上游合并前可能还会改，以那时的 PR 为准。
 
+## 软件渲染器的圆角裁剪
+
+v1.18.1 的软件渲染器对 `clip: true` 只按外接矩形裁，`border-radius` 被忽略（`combine_clip` 里一句 `TODO: handle radius`），子元素会画出圆角之外。上游的问题单是 [slint-ui/slint#4176](https://github.com/slint-ui/slint/issues/4176)，还没有实现；维护者在 [slint-ui/slint#9098](https://github.com/slint-ui/slint/pull/9098) 里说过想要的做法（通用的圆角裁剪、只在圆角附近做额外计算、带抗锯齿），这里按这个思路自己补，代码标 `LISTARY PATCH`。
+
+### 改了什么
+
+- `rounded_clip.rs`（新文件）：`RoundedClip`（物理像素的矩形加四角半径）、某个像素被裁剪放行多少（0–255，按像素中心到圆角圆心的距离，1 像素宽的过渡），以及 `draw_line`：画一行时，圆角之间整段照常画，圆角外的像素跳过，曲线上的像素逐个画、再按放行比例和原来的像素混合。
+- `lib.rs`：
+  - `SceneBuilder` 带一串圆角裁剪，`RenderState` 记生效的个数；`combine_clip` 收到非零圆角时，按和矩形裁剪相同的物理矩形（同样取整、同样跟屏幕旋转）加一条，半径按 `draw_border_rectangle` 的方式夹到宽高的一半；`restore_state` 退回时去掉。处理器通过新方法 `ProcessScene::set_rounded_clips` 得知当前的裁剪。
+  - 直接画屏：`RenderToBuffer::foreach_ranges` 有圆角裁剪时每行走 `draw_line`，所有图元（矩形、圆角矩形与边框、三种渐变、图片、文字、阴影）都经过这里；有圆角裁剪时不走 `TargetPixelBuffer` 的 `draw_rectangle`/`draw_texture` 加速钩子。
+  - 逐行：`SceneItem` 多一个 `rounded_clip` 下标指向 `SceneVectors::rounded_clips`；逐行循环把原来的 `match` 包进闭包，有圆角裁剪的图元走 `draw_line`；「整段不透明遮挡」的优化不用于这些图元。
+- `path.rs`：路径的覆盖率乘上裁剪的放行比例。逐行模式本来就不画路径，照旧。
+- `draw_functions.rs`：`TargetPixel` 加 `mix`（按覆盖率在两个像素之间插值），自带的四种像素格式都实现；默认实现取较近的一个，没有抗锯齿。winit 的软件像素和分层窗像素（`sw.rs`、`ulw.rs`）也实现了。
+- 嵌套的圆角裁剪各自的放行比例相乘。
+- 文档里「不支持 `border-radius` 和 `clip: true` 一起用」那句删掉。
+
+### 测试
+
+- `rounded_clip.rs` 和 `lib.rs` 的单元测试：放行比例只在圆角处小于 255；有圆角裁剪时局部重绘只写脏区，脏区内和整画一致。
+- 截图测试 `basic/clip-rounded`（矩形、带边框的圆角矩形、线性和径向渐变、图片、阴影、四角不同半径、嵌套）、`text/clip-rounded-text`、`path/clip-rounded-path`，覆盖直接画屏、四种旋转、逐行和逐行局部重绘；`basic/clip-border` 的参考图随之更新（第一块的内角现在是圆的）。
+- 本分支原有的软件渲染器测试照常要过。
+
+### 升级
+
+升级 Slint 时看上游 #4176 有没有实现：实现了就去掉本节和对应提交，改用上游的；没实现就把这个提交挑到新分支。冲突多半在 `lib.rs` 的 `foreach_ranges` 和逐行循环，上游常改这两处。
+
 ## `i-slint-backend-winit` 1.18.1 —— 分叉说明（LANDING KIT）
 
 > 本节原是 Listary 仓库 `app/vendor/i-slint-backend-winit/PATCH-NOTES.md`,那时补丁以整包副本放在 Listary 仓库里;搬到本分支后内容照旧,只改了与位置有关的句子。下文 `app/`、`docs/`、`tools/`、`cicd/` 开头的路径都在 Listary 仓库。

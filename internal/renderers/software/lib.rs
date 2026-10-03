@@ -21,11 +21,13 @@ mod fonts;
 mod minimal_software_window;
 #[cfg(feature = "path")]
 mod path;
+mod rounded_clip;
 mod scene;
 
 use self::draw_functions::BoxShadowCommand;
 use self::fonts::GlyphRenderer;
 pub use self::minimal_software_window::MinimalSoftwareWindow;
+use self::rounded_clip::RoundedClip;
 use self::scene::*;
 use alloc::rc::{Rc, Weak};
 use alloc::vec::Vec;
@@ -615,6 +617,7 @@ impl SoftwareRenderer {
                 dirty_range_cache: Vec::new(),
                 dirty_region: Default::default(),
                 scale_factor: factor,
+                rounded_clips: Vec::new(),
             },
             rotation,
             #[cfg(feature = "systemfonts")]
@@ -1353,6 +1356,7 @@ fn render_window_frame_by_line(
                         span.pos.x <= r.start
                             && span.pos.x + span.size.width >= r.end
                             && scene.is_guaranteed_opaque(&span.command)
+                            && span.rounded_clip == 0
                     });
                     let items = match first_cover {
                         Some(i) => &items[..=i],
@@ -1380,92 +1384,113 @@ fn render_window_frame_by_line(
                         let range_buffer =
                             &mut line_buffer[(begin - offset) as usize..(end - offset) as usize];
 
-                        match span.command {
-                            SceneCommand::Rectangle { color } => {
-                                TargetPixel::blend_slice(range_buffer, color);
-                            }
-                            SceneCommand::Texture { texture_index } => {
-                                let texture = &scene.vectors.textures[texture_index as usize];
-                                draw_functions::draw_texture_line(
-                                    &PhysicalRect { origin: span.pos, size: span.size },
-                                    scene.current_line,
-                                    texture,
-                                    range_buffer,
-                                    extra_left_clip,
-                                    extra_right_clip,
-                                );
-                            }
-                            SceneCommand::SharedBuffer { shared_buffer_index } => {
-                                let texture = scene.vectors.shared_buffers
-                                    [shared_buffer_index as usize]
-                                    .as_texture();
-                                draw_functions::draw_texture_line(
-                                    &PhysicalRect { origin: span.pos, size: span.size },
-                                    scene.current_line,
-                                    &texture,
-                                    range_buffer,
-                                    extra_left_clip,
-                                    extra_right_clip,
-                                );
-                            }
-                            SceneCommand::RoundedRectangle { rectangle_index } => {
-                                let rr =
-                                    &scene.vectors.rounded_rectangles[rectangle_index as usize];
-                                draw_functions::draw_rounded_rectangle_line(
-                                    &PhysicalRect { origin: span.pos, size: span.size },
-                                    scene.current_line,
-                                    rr,
-                                    range_buffer,
-                                    extra_left_clip,
-                                    extra_right_clip,
-                                );
-                            }
-                            SceneCommand::LinearGradient { linear_gradient_index } => {
-                                let g =
-                                    &scene.vectors.linear_gradients[linear_gradient_index as usize];
+                        let mut draw =
+                            |range_buffer: &mut [_],
+                             extra_left_clip: i16,
+                             extra_right_clip: i16| {
+                                match span.command {
+                                    SceneCommand::Rectangle { color } => {
+                                        TargetPixel::blend_slice(range_buffer, color);
+                                    }
+                                    SceneCommand::Texture { texture_index } => {
+                                        let texture =
+                                            &scene.vectors.textures[texture_index as usize];
+                                        draw_functions::draw_texture_line(
+                                            &PhysicalRect { origin: span.pos, size: span.size },
+                                            scene.current_line,
+                                            texture,
+                                            range_buffer,
+                                            extra_left_clip,
+                                            extra_right_clip,
+                                        );
+                                    }
+                                    SceneCommand::SharedBuffer { shared_buffer_index } => {
+                                        let texture = scene.vectors.shared_buffers
+                                            [shared_buffer_index as usize]
+                                            .as_texture();
+                                        draw_functions::draw_texture_line(
+                                            &PhysicalRect { origin: span.pos, size: span.size },
+                                            scene.current_line,
+                                            &texture,
+                                            range_buffer,
+                                            extra_left_clip,
+                                            extra_right_clip,
+                                        );
+                                    }
+                                    SceneCommand::RoundedRectangle { rectangle_index } => {
+                                        let rr = &scene.vectors.rounded_rectangles
+                                            [rectangle_index as usize];
+                                        draw_functions::draw_rounded_rectangle_line(
+                                            &PhysicalRect { origin: span.pos, size: span.size },
+                                            scene.current_line,
+                                            rr,
+                                            range_buffer,
+                                            extra_left_clip,
+                                            extra_right_clip,
+                                        );
+                                    }
+                                    SceneCommand::LinearGradient { linear_gradient_index } => {
+                                        let g = &scene.vectors.linear_gradients
+                                            [linear_gradient_index as usize];
 
-                                draw_functions::draw_linear_gradient(
-                                    &PhysicalRect { origin: span.pos, size: span.size },
-                                    scene.current_line,
-                                    g,
-                                    range_buffer,
-                                    extra_left_clip,
-                                );
-                            }
-                            SceneCommand::RadialGradient { radial_gradient_index } => {
-                                let g =
-                                    &scene.vectors.radial_gradients[radial_gradient_index as usize];
-                                draw_functions::draw_radial_gradient(
-                                    &PhysicalRect { origin: span.pos, size: span.size },
-                                    scene.current_line,
-                                    g,
-                                    range_buffer,
-                                    extra_left_clip,
-                                    extra_right_clip,
-                                );
-                            }
-                            SceneCommand::ConicGradient { conic_gradient_index } => {
-                                let g =
-                                    &scene.vectors.conic_gradients[conic_gradient_index as usize];
-                                draw_functions::draw_conic_gradient(
-                                    &PhysicalRect { origin: span.pos, size: span.size },
-                                    scene.current_line,
-                                    g,
-                                    range_buffer,
-                                    extra_left_clip,
-                                    extra_right_clip,
-                                );
-                            }
-                            SceneCommand::BoxShadow { box_shadow_index } => {
-                                let shadow = &scene.vectors.box_shadows[box_shadow_index as usize];
-                                draw_functions::draw_box_shadow_line(
-                                    &PhysicalRect { origin: span.pos, size: span.size },
-                                    scene.current_line,
-                                    shadow,
-                                    range_buffer,
-                                    extra_left_clip,
-                                );
-                            }
+                                        draw_functions::draw_linear_gradient(
+                                            &PhysicalRect { origin: span.pos, size: span.size },
+                                            scene.current_line,
+                                            g,
+                                            range_buffer,
+                                            extra_left_clip,
+                                        );
+                                    }
+                                    SceneCommand::RadialGradient { radial_gradient_index } => {
+                                        let g = &scene.vectors.radial_gradients
+                                            [radial_gradient_index as usize];
+                                        draw_functions::draw_radial_gradient(
+                                            &PhysicalRect { origin: span.pos, size: span.size },
+                                            scene.current_line,
+                                            g,
+                                            range_buffer,
+                                            extra_left_clip,
+                                            extra_right_clip,
+                                        );
+                                    }
+                                    SceneCommand::ConicGradient { conic_gradient_index } => {
+                                        let g = &scene.vectors.conic_gradients
+                                            [conic_gradient_index as usize];
+                                        draw_functions::draw_conic_gradient(
+                                            &PhysicalRect { origin: span.pos, size: span.size },
+                                            scene.current_line,
+                                            g,
+                                            range_buffer,
+                                            extra_left_clip,
+                                            extra_right_clip,
+                                        );
+                                    }
+                                    SceneCommand::BoxShadow { box_shadow_index } => {
+                                        let shadow =
+                                            &scene.vectors.box_shadows[box_shadow_index as usize];
+                                        draw_functions::draw_box_shadow_line(
+                                            &PhysicalRect { origin: span.pos, size: span.size },
+                                            scene.current_line,
+                                            shadow,
+                                            range_buffer,
+                                            extra_left_clip,
+                                        );
+                                    }
+                                }
+                            };
+                        if span.rounded_clip == 0 {
+                            draw(range_buffer, extra_left_clip, extra_right_clip);
+                        } else {
+                            // LISTARY PATCH: through the span's rounded clips.
+                            rounded_clip::draw_line(
+                                &scene.vectors.rounded_clips[span.rounded_clip as usize - 1],
+                                scene.current_line.get(),
+                                begin,
+                                range_buffer,
+                                extra_left_clip,
+                                extra_right_clip,
+                                &mut draw,
+                            );
                         }
                     }
                 },
@@ -1606,6 +1631,8 @@ trait ProcessScene {
     fn process_radial_gradient(&mut self, geometry: PhysicalRect, gradient: RadialGradientCommand);
     fn process_conic_gradient(&mut self, geometry: PhysicalRect, gradient: ConicGradientCommand);
     fn process_box_shadow(&mut self, geometry: PhysicalRect, shadow: BoxShadowCommand);
+    /// LISTARY PATCH: the rounded clips that apply to everything processed from now on.
+    fn set_rounded_clips(&mut self, clips: &[RoundedClip]);
     #[cfg(feature = "path")]
     fn process_filled_path(
         &mut self,
@@ -1917,6 +1944,7 @@ struct RenderToBuffer<'a, TargetPixelBuffer> {
     dirty_range_cache: Vec<core::ops::Range<i16>>,
     dirty_region: PhysicalRegion,
     scale_factor: ScaleFactor,
+    rounded_clips: Vec<RoundedClip>,
 }
 
 impl<B: target_pixel_buffer::TargetPixelBuffer> RenderToBuffer<'_, B> {
@@ -1948,13 +1976,21 @@ impl<B: target_pixel_buffer::TargetPixelBuffer> RenderToBuffer<'_, B> {
                 };
 
                 for l in region.y_range() {
-                    f(
-                        l,
-                        &mut self.buffer.line_slice(l as usize)
-                            [region.min_x() as usize..region.max_x() as usize],
-                        extra_left_clip,
-                        extra_right_clip,
-                    );
+                    let line = &mut self.buffer.line_slice(l as usize)
+                        [region.min_x() as usize..region.max_x() as usize];
+                    if self.rounded_clips.is_empty() {
+                        f(l, line, extra_left_clip, extra_right_clip);
+                    } else {
+                        rounded_clip::draw_line(
+                            &self.rounded_clips,
+                            l,
+                            begin,
+                            line,
+                            extra_left_clip,
+                            extra_right_clip,
+                            &mut |pixels, left, right| f(l, pixels, left, right),
+                        );
+                    }
                 }
             }
             if next == geometry.max_y() {
@@ -1988,7 +2024,9 @@ impl<B: target_pixel_buffer::TargetPixelBuffer> ProcessScene for RenderToBuffer<
         texture: &target_pixel_buffer::DrawTextureArgs,
         clip: PhysicalRect,
     ) {
-        if self.buffer.draw_texture(texture, &self.dirty_region.intersection(&clip)) {
+        if self.rounded_clips.is_empty()
+            && self.buffer.draw_texture(texture, &self.dirty_region.intersection(&clip))
+        {
             return;
         }
 
@@ -2004,7 +2042,9 @@ impl<B: target_pixel_buffer::TargetPixelBuffer> ProcessScene for RenderToBuffer<
         args: &target_pixel_buffer::DrawRectangleArgs,
         clip: PhysicalRect,
     ) {
-        if self.buffer.draw_rectangle(args, &self.dirty_region.intersection(&clip)) {
+        if self.rounded_clips.is_empty()
+            && self.buffer.draw_rectangle(args, &self.dirty_region.intersection(&clip))
+        {
             return;
         }
 
@@ -2078,6 +2118,11 @@ impl<B: target_pixel_buffer::TargetPixelBuffer> ProcessScene for RenderToBuffer<
         });
     }
 
+    fn set_rounded_clips(&mut self, clips: &[RoundedClip]) {
+        self.rounded_clips.clear();
+        self.rounded_clips.extend_from_slice(clips);
+    }
+
     #[cfg(feature = "path")]
     fn process_filled_path(
         &mut self,
@@ -2092,6 +2137,7 @@ impl<B: target_pixel_buffer::TargetPixelBuffer> ProcessScene for RenderToBuffer<
             &path_geometry,
             &clip_geometry,
             &self.dirty_region,
+            &self.rounded_clips,
             color,
             self.buffer,
         );
@@ -2115,6 +2161,7 @@ impl<B: target_pixel_buffer::TargetPixelBuffer> ProcessScene for RenderToBuffer<
             &path_geometry,
             &clip_geometry,
             &self.dirty_region,
+            &self.rounded_clips,
             color,
             stroke_width,
             stroke_line_cap,
@@ -2159,6 +2206,7 @@ fn a_path_draws_only_inside_the_dirty_region() {
             dirty_range_cache: Vec::new(),
             dirty_region,
             scale_factor: ScaleFactor::new(1.0),
+            rounded_clips: Vec::new(),
         };
         if stroke {
             renderer.process_stroked_path(
@@ -2199,6 +2247,8 @@ struct PrepareScene {
     items: Vec<SceneItem>,
     vectors: SceneVectors,
     scale_factor: ScaleFactor,
+    /// LISTARY PATCH: the `SceneItem::rounded_clip` of the items processed from now on.
+    rounded_clip: u16,
 }
 
 impl ProcessScene for PrepareScene {
@@ -2209,6 +2259,7 @@ impl ProcessScene for PrepareScene {
             pos: geometry.origin,
             size: geometry.size,
             z: self.items.len() as u16,
+            rounded_clip: self.rounded_clip,
             command: SceneCommand::Texture { texture_index },
         });
     }
@@ -2236,6 +2287,7 @@ impl ProcessScene for PrepareScene {
                     pos: geometry.origin,
                     size: geometry.size,
                     z: self.items.len() as u16,
+                    rounded_clip: self.rounded_clip,
                     command: SceneCommand::Texture { texture_index },
                 });
             }
@@ -2250,6 +2302,7 @@ impl ProcessScene for PrepareScene {
                     pos: geometry.origin,
                     size: geometry.size,
                     z: self.items.len() as u16,
+                    rounded_clip: self.rounded_clip,
                     command: SceneCommand::SharedBuffer { shared_buffer_index },
                 });
             }
@@ -2270,7 +2323,9 @@ impl ProcessScene for PrepareScene {
         if !size.is_empty() {
             let z = self.items.len() as u16;
             let pos = geometry.origin;
-            self.items.push(SceneItem { pos, size, z, command: SceneCommand::Rectangle { color } });
+            let rounded_clip = self.rounded_clip;
+            let command = SceneCommand::Rectangle { color };
+            self.items.push(SceneItem { pos, size, z, rounded_clip, command });
         }
     }
 
@@ -2283,6 +2338,7 @@ impl ProcessScene for PrepareScene {
                 pos: geometry.origin,
                 size,
                 z: self.items.len() as u16,
+                rounded_clip: self.rounded_clip,
                 command: SceneCommand::RoundedRectangle { rectangle_index },
             });
         }
@@ -2297,6 +2353,7 @@ impl ProcessScene for PrepareScene {
                 pos: geometry.origin,
                 size,
                 z: self.items.len() as u16,
+                rounded_clip: self.rounded_clip,
                 command: SceneCommand::LinearGradient { linear_gradient_index: gradient_index },
             });
         }
@@ -2310,6 +2367,7 @@ impl ProcessScene for PrepareScene {
                 pos: geometry.origin,
                 size,
                 z: self.items.len() as u16,
+                rounded_clip: self.rounded_clip,
                 command: SceneCommand::RadialGradient { radial_gradient_index },
             });
         }
@@ -2323,10 +2381,20 @@ impl ProcessScene for PrepareScene {
                 pos: geometry.origin,
                 size,
                 z: self.items.len() as u16,
+                rounded_clip: self.rounded_clip,
                 command: SceneCommand::ConicGradient { conic_gradient_index },
             });
         }
     }
+    fn set_rounded_clips(&mut self, clips: &[RoundedClip]) {
+        self.rounded_clip = if clips.is_empty() {
+            0
+        } else {
+            self.vectors.rounded_clips.push(clips.to_vec());
+            self.vectors.rounded_clips.len() as u16
+        };
+    }
+
     fn process_box_shadow(&mut self, geometry: PhysicalRect, shadow: BoxShadowCommand) {
         let size = geometry.size;
         if !size.is_empty() {
@@ -2336,6 +2404,7 @@ impl ProcessScene for PrepareScene {
                 pos: geometry.origin,
                 size,
                 z: self.items.len() as u16,
+                rounded_clip: self.rounded_clip,
                 command: SceneCommand::BoxShadow { box_shadow_index },
             });
         }
@@ -2377,6 +2446,8 @@ struct SceneBuilder<'a, T> {
     scale_factor: ScaleFactor,
     window: &'a WindowInner,
     rotation: RotationInfo,
+    /// LISTARY PATCH: the rounded clips in effect; `RenderState::rounded_clips` says how many.
+    rounded_clips: Vec<RoundedClip>,
     #[cfg(feature = "systemfonts")]
     text_layout_cache: &'a sharedparley::TextLayoutCache,
 }
@@ -2400,10 +2471,12 @@ impl<'a, T: ProcessScene> SceneBuilder<'a, T> {
                     LogicalPoint::default(),
                     (screen_size.cast() / scale_factor).cast(),
                 ),
+                rounded_clips: 0,
             },
             scale_factor,
             window,
             rotation: RotationInfo { orientation, screen_size },
+            rounded_clips: Vec::new(),
             #[cfg(feature = "systemfonts")]
             text_layout_cache,
         }
@@ -2825,6 +2898,8 @@ struct RenderState {
     alpha: f32,
     offset: LogicalPoint,
     clip: LogicalRect,
+    /// LISTARY PATCH: how many of `SceneBuilder::rounded_clips` apply.
+    rounded_clips: usize,
 }
 
 impl<T: ProcessScene> i_slint_core::item_rendering::ItemRenderer for SceneBuilder<'_, T> {
@@ -3275,18 +3350,37 @@ impl<T: ProcessScene> i_slint_core::item_rendering::ItemRenderer for SceneBuilde
         );
     }
 
-    fn combine_clip(&mut self, other: LogicalRect, _radius: LogicalBorderRadius) -> bool {
-        match self.current_state.clip.intersection(&other) {
-            Some(r) => {
-                self.current_state.clip = r;
-                true
-            }
-            None => {
-                self.current_state.clip = LogicalRect::default();
-                false
-            }
+    fn combine_clip(&mut self, other: LogicalRect, radius: LogicalBorderRadius) -> bool {
+        let Some(r) = self.current_state.clip.intersection(&other) else {
+            self.current_state.clip = LogicalRect::default();
+            return false;
+        };
+        self.current_state.clip = r;
+        // LISTARY PATCH: cut the corners too, on the same physical rectangle as the rectangular
+        // clip and with the radii clamped as `draw_border_rectangle` clamps them.
+        if !radius.is_zero() {
+            let rect = (other.translate(self.current_state.offset.to_vector()).cast()
+                * self.scale_factor)
+                .round()
+                .transformed(self.rotation);
+            let radius = (radius.cast() * self.scale_factor)
+                .transformed(self.rotation)
+                .min(BorderRadius::from_length(rect.width_length() / 2.))
+                .min(BorderRadius::from_length(rect.height_length() / 2.));
+            self.rounded_clips.truncate(self.current_state.rounded_clips);
+            self.rounded_clips.push(RoundedClip {
+                rect: rect.to_box2d(),
+                radius: [
+                    radius.top_left,
+                    radius.top_right,
+                    radius.bottom_right,
+                    radius.bottom_left,
+                ],
+            });
+            self.current_state.rounded_clips = self.rounded_clips.len();
+            self.processor.set_rounded_clips(&self.rounded_clips);
         }
-        // TODO: handle radius
+        true
     }
 
     fn get_current_clip(&self) -> LogicalRect {
@@ -3320,7 +3414,12 @@ impl<T: ProcessScene> i_slint_core::item_rendering::ItemRenderer for SceneBuilde
     }
 
     fn restore_state(&mut self) {
-        self.current_state = self.state_stack.pop().unwrap();
+        let restored = self.state_stack.pop().unwrap();
+        if restored.rounded_clips != self.current_state.rounded_clips {
+            self.rounded_clips.truncate(restored.rounded_clips);
+            self.processor.set_rounded_clips(&self.rounded_clips);
+        }
+        self.current_state = restored;
     }
 
     fn scale_factor(&self) -> ScaleFactor {
@@ -3722,6 +3821,7 @@ fn render_region(
         dirty_range_cache: Vec::new(),
         dirty_region: PhysicalRegion { rectangles, count: region.len() },
         scale_factor,
+        rounded_clips: Vec::new(),
     };
     draw(&mut processor);
     data
@@ -3918,4 +4018,33 @@ fn drop_shadow_of_huge_shape_matches_a_smaller_one() {
     let huge_blur =
         render_drop_shadow(screen_size, &options(3e7, 3e7, 3e7), euclid::point2(-1e7, -1e7));
     assert!(huge_blur.iter().any(|p| p.alpha > 0));
+}
+
+/// LISTARY PATCH: with a rounded clip, a partial redraw writes only inside the dirty region, and
+/// there the same pixels as a full redraw: nothing outside the curves, the item inside them.
+#[test]
+fn a_rounded_clip_draws_only_inside_the_dirty_region() {
+    let screen_size = PhysicalSize::new(40, 40);
+    let screen = PhysicalRect::from_size(screen_size);
+    let clip = RoundedClip {
+        rect: euclid::Box2D::new(euclid::point2(4., 4.), euclid::point2(36., 36.)),
+        radius: [12., 12., 12., 12.],
+    };
+    let color = PremultipliedRgbaColor { red: 0, green: 128, blue: 0, alpha: 128 };
+    let draw = |processor: &mut dyn ProcessScene| {
+        processor.set_rounded_clips(&[clip]);
+        processor.process_simple_rectangle(screen, color);
+    };
+    // The regions cut through the top-left and the bottom-right curves.
+    let region = [euclid::rect(0, 0, 10, 12), euclid::rect(30, 20, 10, 20)];
+    let full = render_region(screen_size, &[screen], ScaleFactor::new(1.), draw);
+    let partial = render_region(screen_size, &region, ScaleFactor::new(1.), draw);
+    let at = |x: usize, y: usize| full[y * 40 + x].alpha;
+    assert_eq!((at(4, 4), at(20, 20), at(35, 35)), (0, 128, 0));
+    assert!((1..128).contains(&at(7, 7)), "the curve is anti-aliased: {}", at(7, 7));
+    for (i, (a, b)) in full.iter().zip(partial.iter()).enumerate() {
+        let p = PhysicalPoint::new((i % 40) as i16, (i / 40) as i16);
+        let expected = if region.iter().any(|r| r.contains(p)) { *a } else { Default::default() };
+        assert_eq!(bytemuck::bytes_of(b), bytemuck::bytes_of(&expected), "{p:?}");
+    }
 }

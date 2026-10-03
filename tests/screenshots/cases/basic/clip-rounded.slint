@@ -1,0 +1,126 @@
+// Copyright © SixtyFPS GmbH <info@slint.dev>
+// SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0
+
+// SIZE=248x128
+// BASE_THRESHOLD=3
+// ROTATION_THRESHOLD=45  - the border radius algorithm doesn't give the same result from every rotation
+
+// `clip: true` with a `border-radius` clips children to the rounded corners (LISTARY PATCH in the
+// software renderer). Each cell is one kind of child that overflows a rounded clip; outside the
+// curves the black window background must show.
+
+component Cell inherits Rectangle {
+    width: 56px;
+    height: 56px;
+    clip: true;
+    border-radius: 16px;
+}
+
+export component TestCase inherits Window {
+    width: 248px;
+    height: 128px;
+    background: black;
+
+    // A plain rectangle.
+    Cell {
+        x: 4px;
+        y: 4px;
+        Rectangle {
+            x: -8px;
+            y: -8px;
+            width: 72px;
+            height: 72px;
+            background: #00c000;
+        }
+    }
+
+    // A rounded rectangle with a border, whose own corners are smaller than the clip's.
+    Cell {
+        x: 64px;
+        y: 4px;
+        Rectangle {
+            background: #2050ff;
+            border-width: 6px;
+            border-color: yellow;
+            border-radius: 4px;
+        }
+    }
+
+    // A linear and a radial gradient.
+    Cell {
+        x: 124px;
+        y: 4px;
+        Rectangle {
+            background: @linear-gradient(45deg, red 0%, blue 100%);
+        }
+    }
+
+    Cell {
+        x: 184px;
+        y: 4px;
+        Rectangle {
+            background: @radial-gradient(circle, white 0%, magenta 100%);
+        }
+    }
+
+    // An image.
+    Cell {
+        x: 4px;
+        y: 68px;
+        Image {
+            width: 100%;
+            height: 100%;
+            source: @image-url("../image/border-image.png");
+            image-fit: fill;
+        }
+    }
+
+    // A drop shadow spilling into the corners.
+    Cell {
+        x: 64px;
+        y: 68px;
+        background: #404040;
+        Rectangle {
+            x: 14px;
+            y: 14px;
+            width: 28px;
+            height: 28px;
+            background: white;
+            drop-shadow-blur: 8px;
+            drop-shadow-spread: 12px;
+            drop-shadow-color: cyan;
+        }
+    }
+
+    // Different radii per corner, and a translucent child.
+    Cell {
+        x: 124px;
+        y: 68px;
+        border-radius: 0px;
+        border-top-left-radius: 24px;
+        border-top-right-radius: 4px;
+        border-bottom-right-radius: 12px;
+        border-bottom-left-radius: 0px;
+        Rectangle {
+            background: #ff800080;
+        }
+    }
+
+    // Nested: the inner clip's corners sit inside the outer clip's corners.
+    Cell {
+        x: 184px;
+        y: 68px;
+        background: #800000;
+        Rectangle {
+            x: -10px;
+            y: 10px;
+            width: 52px;
+            height: 52px;
+            clip: true;
+            border-radius: 20px;
+            Rectangle {
+                background: #00ffff;
+            }
+        }
+    }
+}

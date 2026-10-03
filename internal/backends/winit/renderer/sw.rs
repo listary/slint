@@ -280,6 +280,13 @@ impl TargetPixel for SoftBufferPixel {
     fn background() -> Self {
         Self(0)
     }
+
+    // LISTARY PATCH: anti-aliased edges for rounded clips.
+    fn mix(&mut self, other: Self, coverage: u8) {
+        let mut mixed = PremultipliedRgbaColor::from(*self);
+        mixed.mix(other.into(), coverage);
+        *self = mixed.into();
+    }
 }
 
 impl WinitSoftwareRenderer {

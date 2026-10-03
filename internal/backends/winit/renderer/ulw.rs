@@ -299,6 +299,13 @@ impl i_slint_renderer_software::TargetPixel for SoftwarePixel {
     fn background() -> Self {
         Self(0)
     }
+
+    // LISTARY PATCH: anti-aliased edges for rounded clips.
+    fn mix(&mut self, other: Self, coverage: u8) {
+        let mut mixed = i_slint_renderer_software::PremultipliedRgbaColor::from(*self);
+        mixed.mix(other.into(), coverage);
+        *self = mixed.into();
+    }
 }
 
 /// The per-window renderer selected for windows armed via

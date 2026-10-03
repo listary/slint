@@ -63,6 +63,7 @@ fn render_path_with_style<T: TargetPixel>(
     path_geometry: &PhysicalRect,
     clip_geometry: &PhysicalRect,
     dirty_region: &PhysicalRegion,
+    rounded_clips: &[crate::RoundedClip],
     color: PremultipliedRgbaColor,
     style: zeno::Style,
     buffer: &mut impl crate::target_pixel_buffer::TargetPixelBuffer<TargetPixel = T>,
@@ -133,7 +134,13 @@ fn render_path_with_style<T: TargetPixel>(
                     }
 
                     let mask_idx = (mask_y as usize) * path_width + (mask_x as usize);
-                    let coverage = mask_buffer[mask_idx];
+                    // LISTARY PATCH: and only what the rounded clips let through.
+                    let clip = crate::rounded_clip::coverage(
+                        rounded_clips,
+                        screen_x as i16,
+                        screen_y as i16,
+                    );
+                    let coverage = (mask_buffer[mask_idx] as u16 * clip as u16 / 255) as u8;
 
                     if coverage > 0 {
                         // Scale all color components by coverage to maintain premultiplication
@@ -159,6 +166,7 @@ fn render_path_with_style<T: TargetPixel>(
 /// * `path_geometry` - The full bounding box of the path in screen coordinates
 /// * `clip_geometry` - The clipped region where the path should be rendered (intersection of path and clip)
 /// * `dirty_region` - LISTARY PATCH: the region being redrawn; nothing outside it is written
+/// * `rounded_clips` - LISTARY PATCH: the rounded clips the path is drawn through
 /// * `color` - The color to render the path
 /// * `buffer` - The target pixel buffer
 pub fn render_filled_path<T: TargetPixel>(
@@ -166,6 +174,7 @@ pub fn render_filled_path<T: TargetPixel>(
     path_geometry: &PhysicalRect,
     clip_geometry: &PhysicalRect,
     dirty_region: &PhysicalRegion,
+    rounded_clips: &[crate::RoundedClip],
     color: PremultipliedRgbaColor,
     buffer: &mut impl crate::target_pixel_buffer::TargetPixelBuffer<TargetPixel = T>,
 ) {
@@ -174,6 +183,7 @@ pub fn render_filled_path<T: TargetPixel>(
         path_geometry,
         clip_geometry,
         dirty_region,
+        rounded_clips,
         color,
         zeno::Style::Fill(Fill::NonZero),
         buffer,
@@ -186,14 +196,17 @@ pub fn render_filled_path<T: TargetPixel>(
 /// * `path_geometry` - The full bounding box of the path in screen coordinates
 /// * `clip_geometry` - The clipped region where the path should be rendered (intersection of path and clip)
 /// * `dirty_region` - LISTARY PATCH: the region being redrawn; nothing outside it is written
+/// * `rounded_clips` - LISTARY PATCH: the rounded clips the path is drawn through
 /// * `color` - The color to render the path
 /// * `stroke_width` - The width of the stroke
 /// * `buffer` - The target pixel buffer
+#[allow(clippy::too_many_arguments)]
 pub fn render_stroked_path<T: TargetPixel>(
     commands: &[Command],
     path_geometry: &PhysicalRect,
     clip_geometry: &PhysicalRect,
     dirty_region: &PhysicalRegion,
+    rounded_clips: &[crate::RoundedClip],
     color: PremultipliedRgbaColor,
     stroke_width: f32,
     stroke_line_cap: i_slint_core::items::LineCap,
@@ -220,6 +233,7 @@ pub fn render_stroked_path<T: TargetPixel>(
         path_geometry,
         clip_geometry,
         dirty_region,
+        rounded_clips,
         color,
         style,
         buffer,
