@@ -147,16 +147,18 @@ v1.18.1 的软件渲染器对 `clip: true` 只按外接矩形裁，`border-radiu
 ② **R-89 原子呈现(ULW)**(`renderer/ulw.rs` 整份新增 + 三个文件的接线);
 ③ ~~`D-13` 「系统拿走了指针捕获」的一位~~:260923 删除,产品改用 winit 的 `drag_window()`(§二点七);
 ④ ~~T-11 每窗指针坐标~~:升 1.18.1 时删除,上游已按窗保存指针状态(§六);
-⑤ **T-14 行为修复**:隐藏窗停止重复请求重绘、按窗补充重绘(§七;动画期无障碍节流 260923 已删除)。
+⑤ **T-14 行为修复**:隐藏窗停止重复请求重绘、按窗补充重绘(§七;动画期无障碍节流 260923 已删除);
+⑥ **AccessKit 建树时销毁的组件不再留在内存里**(`accesskit.rs`、`event_loop.rs`,§八)。
 版本号保持 `1.18.1`,通过 `[patch.crates-io]` 顶替 registry 版本,锁文件里不出现第二个
 版本,`slint = "=1.18.1"` 的精确钉版纪律不受影响。与上游不同的文件只有 `lib.rs`、
-`winitwindowadapter.rs`、`event_loop.rs`、`frame_throttle.rs`、`renderer/sw.rs` 和新增的
-`renderer/ulw.rs`,共 31 处 `LISTARY PATCH` 标记;其余文件与上游 1.18.1 逐字相同。
+`winitwindowadapter.rs`、`event_loop.rs`、`frame_throttle.rs`、`accesskit.rs`、`renderer/sw.rs`
+和新增的 `renderer/ulw.rs`,共 41 行带 `LISTARY PATCH` 标记;其余文件与上游 1.18.1 逐字相同。
 
 > **260907**:曾经还有第四处 —— 批 6 的 W1 二分诊断开关(`accesskit.rs`,260906),让
 > accesskit 适配器可以不建。二分矩阵跑完后它已删除,`accesskit.rs` 回到上游 1.17.1 的
 > 逐字副本;读数见
-> `docs/specs/260731-rust-migration/260904-c22-auto-update/w1-status.md` §2。
+> `docs/specs/260731-rust-migration/260904-c22-auto-update/w1-status.md` §2。现在
+> `accesskit.rs` 又带了 §八 的修复,不再是逐字副本。
 
 > **260820 变更**:本分叉曾带第二处功能 —— 窗口级合成模式(`CompositionMode`,launcher
 > 透明边距的 DirectComposition 逃生舱,+114 行/3 文件)。随渲染器默认切回 femtovg-GL
@@ -179,6 +181,7 @@ v1.18.1 的软件渲染器对 `clip: true` 只按外接矩形裁，`border-radiu
 | `winitwindowadapter.rs`(+约 70 行,`LISTARY PATCH (R-89)` 标记) | ① `set_position` / `resize_window` 对 ULW 窗**不走 winit**(原点截存 + 同步派发 `Resized`);② `map_native_window` 单点(ULW 窗走裸 `ShowWindow`,绕开 winit 的 flag diff),每次显示先画一帧再映射;③ `ensure_window` 尾部的 `set_enabled_buttons` 对 ULW 窗跳过;④ `set_visibility` 的首帧预画对 ULW 窗跳过(交给 ②,免得首次显示画两遍);⑤ 原生窗建出来之前隐藏时,把待建属性的 `visible` 清回 false(普通窗经 `set_visible` 本来就清;不清的话建窗前「显示 → 隐藏」会在建窗时被重新映射);⑥ 已经呈现过的 ULW 窗收到系统报来的 `Resized` 时不改 Slint 记的尺寸,缩放变化时随新缩放一起改尺寸(`keeps_own_size`,见 §二点五「系统报来的尺寸」) |
 | `renderer/sw.rs`(约 +270 行,均带 `LISTARY PATCH (R-31)` 标记) | ① `NotifyingSoftwareRenderer` 包装 + 生命周期触发点,转发 `RendererSealed` 的全部方法;② 全量 present(废弃按脏矩形 present) |
 | `winitwindowadapter.rs`、`event_loop.rs`、`frame_throttle.rs`(`LISTARY PATCH (T-14)` 标记) | 隐藏窗停止帧定时器续跑、按窗补充重绘,见 §七 |
+| `accesskit.rs`、`event_loop.rs`(`LISTARY PATCH (accesskit-destroyed-during-build)` 标记) | 建无障碍树前先实例化组件树;每次建树清掉已销毁组件的弱引用,见 §八 |
 
 原来还有一行 `LISTARY PATCH (260820)`:`handle_focus_change` 的 `borrow_mut()` 改 `try_borrow_mut`,
 防无障碍客户端发 Focus 动作时重入 panic。1.18.1 上游已经是 `try_borrow_mut`,升版时删除。
@@ -477,3 +480,49 @@ A(跨 tick 保留动画检查,`animation_state.rs`)只服务于上面的无障�
 
 行为测试:`cargo test -p listary-ui --test winit_redraw_scheduling`(教程窗的状态转圈在动时,静止的
 字形探针窗 1 秒里几乎不画)。
+
+
+## 八、AccessKit 建树时销毁的组件
+
+**现象**:有 UI 自动化客户端(讲述人、部分输入法、截图或远控软件)激活了无障碍树时,文件搜索大窗每搜一次,
+默认堆里多出几百对块(约 2.8 KB 配约 200 B),只在关窗时才还。关掉图标、换软件渲染都照样涨;Listary 一次实测
+里大窗开着搜 500 次,进程私有内存从 746 MB 涨到 2224 MB。
+
+**成因**(上游 1.18.1 的 `accesskit.rs` / `winitwindowadapter.rs` 原样如此):
+- 建树在 `AccessKitAdapter` 被可变借用期间进行(`reload_tree` 的延迟回调、`InitialTreeRequested`)。
+  建树开头调 `WindowInner::ensure_tree_instantiated()`,读几何时还会求值 `ListView` 的布局绑定;两者都会
+  更新 repeater,当场销毁不再需要的行组件(例如行里的 `if !item.placeholder : cells` 和它里面的图标)。
+- 组件销毁时走 `WinitWindowAdapter::unregister_item_tree`,它对 AccessKit 适配器只 `try_borrow_mut`;
+  借不到就什么都不做。`components_by_id` 里这个组件的 `ItemTreeWeak` 于是留下来,而 `VRc` 只要还有弱引用
+  就不释放那块内存 —— 组件本体一直占着,直到窗口的 adapter 销毁。子组件的 `parent` 弱引用又把父组件的
+  内存一起留住,所以是成对的块。
+- 上游 `register_item_tree` 的注释已经承认「建树时会新建组件」,销毁那一侧没有处理。
+
+**修法**(每处都有 `LISTARY PATCH (accesskit-destroyed-during-build)` 标记,`accesskit.rs` 7 行、`event_loop.rs` 1 行):
+1. `reload_tree` 的延迟回调在借用适配器**之前**先 `ensure_tree_instantiated()`(只在已向客户端发过树时做,
+   没有客户端时行为不变);`event_loop.rs` 在处理 `InitialTreeRequested` 前同样先实例化。多数销毁因此发生在
+   借用之外,`unregister_item_tree` 能正常清理。
+2. `build_new_tree` 开头调 `NodeCollection::forget_destroyed_components`:`components_by_id` 里升级不了的
+   弱引用连同 `component_ids`、编号一起清掉。布局绑定里的销毁挡不住,这一步保证遗留最多留到下一次建树。
+   清掉后那块内存可能被新组件复用,而 `text_state`(文本输入框的文字节点状态)按组件指针存、没有活的
+   `ItemTreeRef` 删不了单项。所以另记一张 `text_state_components`(哪些组件在 `text_state` 里有条目),
+   只有被清掉的组件里有这种组件时才整张清 `text_state`(上游在客户端断开时也是整张清)。结果行里没有
+   `TextInput`,平时清的都是行,搜索框的文字节点状态保持不动;这份状态要一直留着,节点编号才稳定,
+   读屏软件看到的才是「节点更新」而不是「子树替换」。
+
+**没覆盖的一处**:`text_state` 按 `TextInput` 自己所在的组件存,而那个组件(例如 `LineEdit` 里面的内部
+`TextInput`)可能从来没有在 `components_by_id` 里分到编号。这样的组件如果恰好在建树期间销毁,
+`forget_destroyed_components` 看不到它,它在 `text_state` 里的旧条目照样留着。这是上游原有的情况
+(上游在同一处同样跳过 `component_destroyed`),本补丁没有让它变坏,也没有修它;不能说成「文本缓存的生命周期
+问题都修好了」。
+
+**为什么应用侧绕不开**:泄漏发生在后端内部的借用冲突里,触发条件是外部客户端激活无障碍树,与应用怎么写
+界面无关。公开接口里没有关闭 AccessKit 适配器、也没有从外面清理 `components_by_id` 的入口;不开
+`accessibility` 特性会让所有窗口失去无障碍支持,不可取。
+
+**测试**:没有加自动测试。复现需要一个真实的 UIA 客户端去激活树(AccessKit 只在收到 `WM_GETOBJECT` 后才建树),
+headless 测试里造不出来。验证靠实测:有 UIA 客户端时文件搜索大窗分批连续搜,每批后比较默认堆已分配字节和
+行组件块的个数(Listary 仓库 `docs/specs/260731-rust-migration/260926-memory-review.md` 第 5.3 节有改前改后的数字和测法)。
+
+**升级**:升版时先看上游是否已修:`unregister_item_tree` 在借用冲突时仍能清掉 `components_by_id` 的条目,
+或建树改在借用之外实例化,就删掉这几处。
