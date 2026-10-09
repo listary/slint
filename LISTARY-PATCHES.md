@@ -138,6 +138,32 @@ v1.18.1 的软件渲染器对 `clip: true` 只按外接矩形裁，`border-radiu
 
 升级 Slint 时看上游 #4176 有没有实现：实现了就去掉本节和对应提交，改用上游的；没实现就把这个提交挑到新分支。冲突多半在 `lib.rs` 的 `foreach_ranges` 和逐行循环，上游常改这两处。
 
+## 软件渲染器的字形覆盖率修正
+
+v1.18.1 的软件渲染器画字时，字形边缘的覆盖率（0–255）直接当透明度、在 sRGB 里线性混合，没有 gamma 或对比度修正。结果是深色底上的浅色字边缘偏暗，看起来细、发虚；浅色底上的深色字边缘也偏淡。DirectWrite 和 Skia 都在混合前修正覆盖率。这一修正只能在渲染器里做：应用一侧能改的只有颜色，提亮颜色会让字整体变亮（满覆盖的像素也变），而问题只在边缘的半覆盖像素上。代码标 `LISTARY PATCH (text-gamma)`。
+
+### 改了什么
+
+- `text_gamma.rs`（新文件）：按字色的亮度查一张 256 项的表，把覆盖率映射成修正后的覆盖率。表的算法照 Skia 的 `SkMaskGamma`（`build_gamma_table`）：背景取字色亮度的反面（字越亮、假定背景越暗），先按背景亮度把覆盖率抬高一点（对比度项，深色字主要靠它），再按 gamma 1.6 的混合换算回 sRGB 下的覆盖率（浅色字主要靠它）。参数 `GAMMA = 1.6`、`CONTRAST = 1.25`。
+  - 覆盖率 0 和 255 不变：满覆盖的像素和字形轮廓都不动，只有抗锯齿边缘变实。字形位置、大小、栅格化方式（不做 hinting）都不变。
+  - 表里每一项不小于原值：没有字因此变淡。字色和假定背景一样亮（中灰）时表就是原样。
+  - 字色的透明度不进表，照旧在查表之后乘上去，所以半透明字（次要文字、快捷键提示）只是边缘变实，不会整体变亮。不在线性空间里混合，那样会把半透明灰字提亮很多。
+  - 256 张表在第一次画字时一次算好、进程内共用（64 KB）；没有 `std` 的构建不修正。
+- `target_pixel_buffer.rs`：`DrawTextureArgs` 加 `coverage_table`；`scene.rs`：`SceneTextureExtra` 加同名字段，`from_target_texture` 照抄。
+- `lib.rs`：画字形的两处（`draw_text_paragraph` 和 `draw_glyph_run`）按字色取表；图片、缓存的位图、单色图标（编译器也把它们嵌成 alpha 图）和距离场字形填 `None`，照旧。
+- `draw_functions.rs`：`draw_texture_line` 的 alpha 图分支先查表再乘透明度。
+
+GL 渲染器（femtovg）没有改：它的字由 GPU 混合，Listary 在 Windows 上默认不用它。macOS 上产品窗口默认走 femtovg，不经过这里；只有无窗口的测试走软件渲染器。
+
+### 测试
+
+- `text_gamma.rs` 的单元测试：每种亮度的表两端不变、单调、不低于原值；浅色字和深色字半覆盖处都明显加深、中灰不变；alpha 图像素混合时确实读表、不设表时与原来一致；透明度不影响选哪张表。
+- 本分支原有的软件渲染器测试照常要过。
+
+### 升级
+
+升级 Slint 时看上游软件渲染器是否已有文字 gamma／对比度修正：有就去掉本节和对应提交；没有就把提交挑到新分支。冲突多半在 `lib.rs` 构造 `DrawTextureArgs` 的几处（新增字段要补上）和 `draw_functions.rs` 的 alpha 图分支。
+
 ## `i-slint-backend-winit` 1.18.1 —— 分叉说明（LANDING KIT）
 
 > 本节原是 Listary 仓库 `app/vendor/i-slint-backend-winit/PATCH-NOTES.md`,那时补丁以整包副本放在 Listary 仓库里;搬到本分支后内容照旧,只改了与位置有关的句子。下文 `app/`、`docs/`、`tools/`、`cicd/` 开头的路径都在 Listary 仓库。
