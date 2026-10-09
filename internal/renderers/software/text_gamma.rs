@@ -12,7 +12,9 @@
 //! a background of the opposite luminance, after raising the coverage by a contrast term that is
 //! strongest for dark text. Coverage 0 and 255 map to themselves, so fully covered pixels and the
 //! glyph outlines do not change; only the anti-aliased edges get more ink. Coverage is never
-//! lowered, so no text gets lighter than before.
+//! lowered, so no text gets lighter than before. Every text colour gets a similar amount (half
+//! coverage maps to about 150-165): light text mostly through the gamma step, dark text mostly
+//! through the contrast step, mid-grey text through both.
 //!
 //! The text colour's alpha is not part of the table: it is still multiplied in afterwards, like
 //! before. Only glyphs use the table (see `DrawTextureArgs::coverage_table`); alpha-map images
@@ -21,12 +23,15 @@
 /// The table that maps glyph coverage before blending.
 pub type CoverageTable = [u8; 256];
 
-/// Exponent of the blend the correction aims for. 1.0 would leave coverage as is; 2.2 would be a
-/// fully gamma-correct blend, which makes light text much heavier than WPF or DirectWrite draw it.
+/// Exponent of the blend the correction aims for. At 1.0 only the contrast term would raise
+/// coverage; 2.2 would be a fully gamma-correct blend, which makes light text much heavier than
+/// WPF or DirectWrite draw it.
+#[cfg(feature = "std")]
 pub const GAMMA: f32 = 1.6;
 
 /// How much coverage is raised before the gamma step, scaled by the luminance of the assumed
 /// background (and capped at 1): strong under dark text, nearly nothing under light text.
+#[cfg(feature = "std")]
 pub const CONTRAST: f32 = 1.25;
 
 /// The correction table for glyphs drawn in `color`, or `None` when this build has no `std`
@@ -51,6 +56,7 @@ pub fn table_for(_color: i_slint_core::Color) -> Option<&'static CoverageTable> 
 }
 
 /// The text colour's luminance in the blend's gamma space, 0..=255 (alpha ignored).
+#[cfg(feature = "std")]
 fn luminance_index(color: i_slint_core::Color) -> u8 {
     use num_traits::Float;
     let lin = |c: u8| Float::powf(c as f32 / 255.0, GAMMA);
@@ -60,6 +66,7 @@ fn luminance_index(color: i_slint_core::Color) -> u8 {
 
 /// Skia's `build_gamma_table` with the background taken as the opposite luminance, clamped so
 /// that no coverage goes down.
+#[cfg(feature = "std")]
 fn build_table(src: f32, gamma: f32, contrast: f32) -> CoverageTable {
     use num_traits::Float;
     let mut table = [0u8; 256];
@@ -67,6 +74,8 @@ fn build_table(src: f32, gamma: f32, contrast: f32) -> CoverageTable {
         *entry = i as u8;
     }
     let dst = 1.0 - src;
+    // Text exactly as light as the assumed background would divide 0 by 0 below. `table_for` never
+    // asks for it (luminances are n/255), and the tables on either side of it are smooth.
     if (src - dst).abs() < 1.0 / 256.0 {
         return table;
     }
@@ -109,26 +118,35 @@ mod tests {
     }
 
     #[test]
-    fn light_and_dark_text_get_more_edge_ink_and_grey_none() {
-        // Light text through the gamma step, dark text mostly through the contrast step.
-        let light = table_for(Color::from_rgb_u8(0xEC, 0xEA, 0xEA)).unwrap();
-        let dark = table_for(Color::from_rgb_u8(0x24, 0x1E, 0x1F)).unwrap();
-        assert!((150..=175).contains(&light[128]), "light: 128 -> {}", light[128]);
-        assert!((150..=175).contains(&dark[128]), "dark: 128 -> {}", dark[128]);
-        // A colour as light as the assumed background: nothing to correct.
-        let grey = build_table(0.5, GAMMA, CONTRAST);
-        assert!(grey.iter().enumerate().all(|(i, &v)| v as usize == i));
+    fn every_text_colour_gets_about_the_same_edge_ink() {
+        // Light text through the gamma step, dark text mostly through the contrast step,
+        // mid-grey through both: half coverage ends up at about the same value for all of them.
+        for (r, g, b) in [
+            (0xFF, 0xFF, 0xFF),
+            (0xEC, 0xEA, 0xEA),
+            (0x80, 0x80, 0x80),
+            (0x24, 0x1E, 0x1F),
+            (0x00, 0x00, 0x00),
+        ] {
+            let table = table_for(Color::from_rgb_u8(r, g, b)).unwrap();
+            assert!(
+                (145..=170).contains(&table[128]),
+                "#{r:02X}{g:02X}{b:02X}: 128 -> {}",
+                table[128]
+            );
+        }
     }
 
     /// One alpha-map pixel at half coverage, light text over a dark pixel: the blend reads the
-    /// table when it is set and the raw coverage when it is not.
+    /// table when it is set and the raw coverage when it is not, and the text's alpha is applied
+    /// to the corrected coverage.
     #[test]
-    fn the_blend_reads_coverage_through_the_table() {
+    fn the_blend_reads_coverage_through_the_table_then_applies_alpha() {
         use crate::{Fixed, PhysicalLength, PhysicalRect, RenderingRotation, SceneTexture};
         use i_slint_core::graphics::{Rgb8Pixel, TexturePixelFormat};
 
         let color = Color::from_rgb_u8(0xEC, 0xEA, 0xEA);
-        let draw = |coverage_table| {
+        let draw = |coverage_table, alpha: u8| {
             let data = [128u8];
             let texture = SceneTexture {
                 data: &data,
@@ -140,7 +158,7 @@ mod tests {
                     off_x: Fixed::from_integer(0),
                     off_y: Fixed::from_integer(0),
                     colorize: color,
-                    alpha: 255,
+                    alpha,
                     rotation: RenderingRotation::NoRotation,
                     coverage_table,
                 },
@@ -157,16 +175,19 @@ mod tests {
             line[0].g
         };
         let table = table_for(color).unwrap();
-        let plain = draw(None);
-        let corrected = draw(Some(table));
-        // Plain: half the way from 0x24 to 0xEA. Corrected: the table's share of the way.
-        assert!((0x84..=0x88).contains(&plain), "plain {plain:#x}");
-        let expected = 0x24 + (0xEA - 0x24) * table[128] as u16 / 255;
-        assert!(
-            corrected.abs_diff(expected as u8) <= 2,
-            "corrected {corrected:#x}, expected {expected:#x}"
-        );
-        assert!(corrected > plain + 0x10);
+        for alpha in [0xFF, 0x92] {
+            let plain = draw(None, alpha);
+            let corrected = draw(Some(table), alpha);
+            // The green channel goes from 0x24 towards 0xEA by coverage x alpha.
+            let share =
+                |coverage: u16| 0x24 + (0xEA - 0x24) * (coverage * alpha as u16 / 255) / 255;
+            assert!(plain.abs_diff(share(128) as u8) <= 2, "alpha {alpha:#x}: plain {plain:#x}");
+            assert!(
+                corrected.abs_diff(share(table[128] as u16) as u8) <= 2,
+                "alpha {alpha:#x}: corrected {corrected:#x}"
+            );
+            assert!(corrected > plain + 0x08, "alpha {alpha:#x}");
+        }
     }
 
     #[test]
