@@ -96,8 +96,8 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     GetWindowLongPtrW, GetWindowRect, SetWindowLongPtrW, ShowWindow, UpdateLayeredWindow,
-    GWL_EXSTYLE, GWL_STYLE, SW_HIDE, SW_SHOW, SW_SHOWNA, ULW_ALPHA, WS_CAPTION, WS_EX_LAYERED,
-    WS_POPUP,
+    GWL_EXSTYLE, GWL_STYLE, SW_HIDE, SW_SHOW, SW_SHOWNA, ULW_ALPHA, WS_CAPTION, WS_EX_APPWINDOW,
+    WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_POPUP,
 };
 
 use super::{AtomicPresentation, WinitCompatibleRenderer};
@@ -119,7 +119,10 @@ fn enforce_atomic_window_style(hwnd: HWND) {
             SetWindowLongPtrW(hwnd, GWL_STYLE, wanted as isize);
         }
         let ex_style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32;
-        let wanted_ex = ex_style | WS_EX_LAYERED.0;
+        // LISTARY PATCH (atomic-tool-window): a tool window without `WS_EX_APPWINDOW`, so the
+        // taskbar never gets a button. The taskbar decides when the window is first shown, and
+        // winit gives every window without an owner `WS_EX_APPWINDOW`.
+        let wanted_ex = (ex_style | WS_EX_LAYERED.0 | WS_EX_TOOLWINDOW.0) & !WS_EX_APPWINDOW.0;
         if wanted_ex != ex_style {
             SetWindowLongPtrW(hwnd, GWL_EXSTYLE, wanted_ex as isize);
         }

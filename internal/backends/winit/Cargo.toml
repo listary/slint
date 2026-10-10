@@ -183,3 +183,7 @@ harness = false
 [[test]]
 name = "dpi_change_keeps_size"
 harness = false
+
+[[test]]
+name = "atomic_window_off_taskbar"
+harness = false

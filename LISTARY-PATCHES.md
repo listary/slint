@@ -184,7 +184,7 @@ v1.18.1 的软件渲染器对 `clip: true` 只按外接矩形裁，`border-radiu
 版本号保持 `1.18.1`,通过 `[patch.crates-io]` 顶替 registry 版本,锁文件里不出现第二个
 版本,`slint = "=1.18.1"` 的精确钉版纪律不受影响。与上游不同的文件只有 `lib.rs`、
 `winitwindowadapter.rs`、`event_loop.rs`、`frame_throttle.rs`、`accesskit.rs`、`renderer/sw.rs`
-和新增的 `renderer/ulw.rs`,共 44 行带 `LISTARY PATCH` 标记;其余文件与上游 1.18.1 逐字相同。
+和新增的 `renderer/ulw.rs`,共 45 行带 `LISTARY PATCH` 标记;其余文件与上游 1.18.1 逐字相同。
 
 > **260907**:曾经还有第四处 —— 批 6 的 W1 二分诊断开关(`accesskit.rs`,260906),让
 > accesskit 适配器可以不建。二分矩阵跑完后它已删除,`accesskit.rs` 回到上游 1.17.1 的
@@ -618,3 +618,29 @@ handler 可跑了。两处注释补了这个理由(`LISTARY PATCH (accesskit-ree
 真最大化窗口换 DPI 要在桌面上另验。
 
 **升级**:上游若在 `ScaleFactorChanged` 里补上那句 TODO(没有 `Resized` 时按新缩放重设逻辑尺寸),就去掉这处。
+
+## 十、原子呈现窗不进任务栏（`atomic-tool-window`）
+
+**现象**:在桌面或资源管理器里打字弹出的浮动搜索条,第一次召唤后任务栏上留下一个标题为
+「SearchBarWindow」的按钮,按 Esc 收起后也不消失。
+
+**成因**:
+- 任务栏在窗口**显示时**决定要不要给它按钮:没有 owner 的窗口会有按钮,除非它是 `WS_EX_TOOLWINDOW`;
+  带 `WS_EX_APPWINDOW` 的一定有。显示之后再改样式,不会去掉已经有的按钮。
+- winit 给每个没有 owner 的窗口加 `WS_EX_APPWINDOW`,而且每次改窗口标志都会按自己的缓存重算样式。
+- 原子呈现窗(两种搜索条、弹出菜单的各层)第一次映射时还带着它;应用侧要等到第一次隐藏前才改样式,已经晚了。
+
+**修法**(`renderer/ulw.rs` 的 `enforce_atomic_window_style`,`LISTARY PATCH (atomic-tool-window)`):
+和 `WS_EX_LAYERED` 一起保证 `WS_EX_TOOLWINDOW`、去掉 `WS_EX_APPWINDOW`。这个函数在建表面时(第一次映射之前)
+和每次呈现时都跑,所以原子呈现窗从出生起就是工具窗,winit 重算样式后也会在下一次呈现前改回来。
+
+**为什么不只在应用侧改**:应用拿到原生窗口时 winit 已经建好了样式,而 winit 之后每次改窗口标志都会把
+`WS_EX_APPWINDOW` 加回来;只有每次呈现前都执行的这一处能保证映射时样式是对的。应用侧另有一处配合修改
+(先隐藏再改样式),两处一起生效。
+
+**测试**:`internal/backends/winit/tests/atomic_window_off_taskbar.rs`(Windows,显示一个不抢前台的小条):
+`cargo test -p i-slint-backend-winit --features renderer-software --test atomic_window_off_taskbar`。
+线程内的 `WH_CALLWNDPROC` 钩子在窗口第一次收到 `WM_SHOWWINDOW` 时读扩展样式。修前是 `0xc0010`
+(带 `WS_EX_APPWINDOW`、没有 `WS_EX_TOOLWINDOW`);修后是 `0x80090`。
+
+**升级**:R-89 原子呈现是本分叉自己的功能,随 `ulw.rs` 一起带过去。
