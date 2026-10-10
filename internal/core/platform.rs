@@ -110,9 +110,7 @@ pub trait Platform {
         #[cfg(feature = "std")]
         {
             let the_beginning = *INITIAL_INSTANT.get_or_init(time::Instant::now);
-            let now = time::Instant::now();
-            assert!(now >= the_beginning, "The platform's clock is not monotonic!");
-            now - the_beginning
+            elapsed_since(the_beginning, time::Instant::now())
         }
         #[cfg(not(feature = "std"))]
         unimplemented!("The platform abstraction must implement `duration_since_start`")
@@ -207,6 +205,24 @@ pub trait EventLoopProxy: Send + Sync {
 
 #[cfg(feature = "std")]
 static INITIAL_INSTANT: once_cell::sync::OnceCell<time::Instant> = once_cell::sync::OnceCell::new();
+
+/// LISTARY PATCH (clock-goes-back): no time has passed when the clock reads earlier than the
+/// start, instead of panicking. Windows' performance counter goes back a little on some
+/// machines, and the panic took down the whole application.
+#[cfg(feature = "std")]
+fn elapsed_since(the_beginning: time::Instant, now: time::Instant) -> core::time::Duration {
+    now.saturating_duration_since(the_beginning)
+}
+
+#[cfg(all(test, feature = "std"))]
+#[test]
+fn a_clock_that_goes_back_counts_as_no_time_elapsed() {
+    // Windows' performance counter goes back on some machines, even right after start.
+    let the_beginning = time::Instant::now();
+    let later = the_beginning + core::time::Duration::from_millis(5);
+    assert_eq!(elapsed_since(later, the_beginning), core::time::Duration::ZERO);
+    assert_eq!(elapsed_since(the_beginning, later), core::time::Duration::from_millis(5));
+}
 
 #[cfg(feature = "std")]
 impl std::convert::From<crate::animations::Instant> for time::Instant {

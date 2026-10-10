@@ -579,12 +579,24 @@ impl SoftwareRenderer {
         let (size, background) = if let Some(window_item) =
             window_inner.window_item().as_ref().map(|item| item.as_pin_ref())
         {
-            (
-                (LogicalSize::from_lengths(window_item.width(), window_item.height()).cast()
-                    * factor)
-                    .cast(),
-                window_item.background(),
-            )
+            // LISTARY PATCH (render-size-fits-buffer): draw the part of the window that fits the
+            // buffer. The backend sizes the buffer from the native window, and on Windows a new
+            // scale arrives before the matching size. A size that is NaN or out of the 16-bit
+            // range would make the items panic too, so that frame is skipped.
+            let Some(size) = (LogicalSize::from_lengths(window_item.width(), window_item.height())
+                .cast::<f32>()
+                * factor)
+                .try_cast::<i16>()
+            else {
+                return Default::default();
+            };
+            let fit = |max: usize| i16::try_from(max).unwrap_or(i16::MAX);
+            let buffer_size = if rotation.is_transpose() {
+                PhysicalSize::new(fit(num_lines), fit(pixels_per_line))
+            } else {
+                PhysicalSize::new(fit(pixels_per_line), fit(num_lines))
+            };
+            (size.min(buffer_size), window_item.background())
         } else if rotation.is_transpose() {
             (euclid::size2(num_lines as _, pixels_per_line as _), Brush::default())
         } else {
