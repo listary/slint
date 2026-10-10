@@ -184,7 +184,7 @@ v1.18.1 的软件渲染器对 `clip: true` 只按外接矩形裁，`border-radiu
 版本号保持 `1.18.1`,通过 `[patch.crates-io]` 顶替 registry 版本,锁文件里不出现第二个
 版本,`slint = "=1.18.1"` 的精确钉版纪律不受影响。与上游不同的文件只有 `lib.rs`、
 `winitwindowadapter.rs`、`event_loop.rs`、`frame_throttle.rs`、`accesskit.rs`、`renderer/sw.rs`
-和新增的 `renderer/ulw.rs`,共 43 行带 `LISTARY PATCH` 标记;其余文件与上游 1.18.1 逐字相同。
+和新增的 `renderer/ulw.rs`,共 45 行带 `LISTARY PATCH` 标记;其余文件与上游 1.18.1 逐字相同。
 
 > **260907**:曾经还有第四处 —— 批 6 的 W1 二分诊断开关(`accesskit.rs`,260906),让
 > accesskit 适配器可以不建。二分矩阵跑完后它已删除,`accesskit.rs` 回到上游 1.17.1 的
@@ -590,3 +590,57 @@ handler 可跑了。两处注释补了这个理由(`LISTARY PATCH (accesskit-ree
 `ensure_tree_instantiated`);有它时通过。§八 说「headless 造不出 UIA 客户端」,这个办法也可以用来给泄漏写测试。
 
 **升级**:同 §八。上游若改成在借用之外建树或实例化,这条测试照常要过。
+
+## 九、最大化窗口换 DPI（`scale-without-resize`）
+
+**现象**:最大化或全屏的窗口换到缩放不同的显示器、或改系统缩放后,窗口被还原成非最大化,尺寸变成
+「旧逻辑尺寸 × 新缩放」;在这之前的一帧,软件渲染按旧逻辑尺寸 × 新缩放要画面,缓冲区还是旧物理尺寸
+(以前直接断言崩溃,见软件渲染器一节的「窗口尺寸大过缓冲区」)。
+
+**成因**(上游 1.18.1 原样如此):
+- winit 处理 `WM_DPICHANGED` 时,对最大化或全屏的窗口不改尺寸(`allow_resize` 为假),之后不会有 `Resized`。
+- 后端的 `ScaleFactorChanged` 分支只改缩放,窗口元素仍是旧逻辑尺寸(上游那里是一句 TODO)。
+- 下一次同步窗口属性时,`update_window_properties` 把这个旧逻辑尺寸当成窗口应有的尺寸,
+  `resize_window` → winit `request_inner_size`,原生窗口被改大小,winit 顺带去掉最大化。
+
+**修法**(`winitwindowadapter.rs` 的 `ScaleFactorChanged` 分支,`LISTARY PATCH (scale-without-resize)`):
+窗口是最大化或全屏、又没有待交给 winit 的尺寸请求时,按不变的物理尺寸和新缩放立刻重算逻辑尺寸
+(`resize_event`)。这正是 winit 不改尺寸的那几种情况;普通窗口照旧等 winit 报来的新尺寸,不多排一次版。
+原子呈现窗走自己的 `keeps_own_size` 分支,不受影响。
+
+**为什么应用侧绕不开**:缩放变化和随后的窗口属性同步都在后端内部、同一次事件处理里发生,应用在中间
+没有入口;应用事后再设尺寸也晚了,窗口已经被还原。
+
+**测试**:`internal/backends/winit/tests/dpi_change_keeps_size.rs`(Windows,开一个不抢前台的小窗):
+`cargo test -p i-slint-backend-winit --features renderer-software --test dpi_change_keeps_size`。
+先发一条 `SIZE_MAXIMIZED` 的 `WM_SIZE` 让 winit 记成最大化(窗口不真的最大化),再直接发 `WM_DPICHANGED`。
+修前窗口被还原、尺寸从 150×120 变成 200×160;修后仍是最大化、150×120,逻辑尺寸 75×60。
+真最大化窗口换 DPI 要在桌面上另验。
+
+**升级**:上游若在 `ScaleFactorChanged` 里补上那句 TODO(没有 `Resized` 时按新缩放重设逻辑尺寸),就去掉这处。
+
+## 十、原子呈现窗不进任务栏（`atomic-tool-window`）
+
+**现象**:在桌面或资源管理器里打字弹出的浮动搜索条,第一次召唤后任务栏上留下一个标题为
+「SearchBarWindow」的按钮,按 Esc 收起后也不消失。
+
+**成因**:
+- 任务栏在窗口**显示时**决定要不要给它按钮:没有 owner 的窗口会有按钮,除非它是 `WS_EX_TOOLWINDOW`;
+  带 `WS_EX_APPWINDOW` 的一定有。显示之后再改样式,不会去掉已经有的按钮。
+- winit 给每个没有 owner 的窗口加 `WS_EX_APPWINDOW`,而且每次改窗口标志都会按自己的缓存重算样式。
+- 原子呈现窗(两种搜索条、弹出菜单的各层)第一次映射时还带着它;应用侧要等到第一次隐藏前才改样式,已经晚了。
+
+**修法**(`renderer/ulw.rs` 的 `enforce_atomic_window_style`,`LISTARY PATCH (atomic-tool-window)`):
+和 `WS_EX_LAYERED` 一起保证 `WS_EX_TOOLWINDOW`、去掉 `WS_EX_APPWINDOW`。这个函数在建表面时(第一次映射之前)
+和每次呈现时都跑,所以原子呈现窗从出生起就是工具窗,winit 重算样式后也会在下一次呈现前改回来。
+
+**为什么不只在应用侧改**:应用拿到原生窗口时 winit 已经建好了样式,而 winit 之后每次改窗口标志都会把
+`WS_EX_APPWINDOW` 加回来;只有每次呈现前都执行的这一处能保证映射时样式是对的。应用侧另有一处配合修改
+(先隐藏再改样式),两处一起生效。
+
+**测试**:`internal/backends/winit/tests/atomic_window_off_taskbar.rs`(Windows,显示一个不抢前台的小条):
+`cargo test -p i-slint-backend-winit --features renderer-software --test atomic_window_off_taskbar`。
+线程内的 `WH_CALLWNDPROC` 钩子在窗口第一次收到 `WM_SHOWWINDOW` 时读扩展样式。修前是 `0xc0010`
+(带 `WS_EX_APPWINDOW`、没有 `WS_EX_TOOLWINDOW`);修后是 `0x80090`。
+
+**升级**:R-89 原子呈现是本分叉自己的功能,随 `ulw.rs` 一起带过去。

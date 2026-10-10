@@ -1606,8 +1606,17 @@ impl WinitWindowAdapter {
                             scale_factor: scale_factor as f32,
                         },
                     )?;
+                    // LISTARY PATCH (scale-without-resize): winit keeps the size of a maximized or
+                    // fullscreen window when the scale changes, so no `Resized` follows. Its
+                    // logical size comes from the unchanged physical size now. Otherwise frames
+                    // ask for the old logical size at the new scale, and the window properties
+                    // resize the native window to that stale size, which also restores it.
+                    let keeps_physical_size = kept_logical_size.is_none()
+                        && (winit_window.is_maximized() || winit_window.fullscreen().is_some());
                     if let Some(physical) = self.physical_size_before_scale_factor.take() {
                         inner_size_writer.request_inner_size(physical).ok();
+                    } else if keeps_physical_size {
+                        self.resize_event(physical_size_to_winit(self.size.get()))?;
                     }
                     if let Some(logical) = kept_logical_size {
                         self.resize_event(
