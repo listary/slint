@@ -72,6 +72,10 @@ pub struct DrawTextureArgs {
     /// and a value of 255 would mean fully opaque.
     pub alpha: u8,
 
+    /// LISTARY PATCH (text-gamma): for glyphs, the table that maps their coverage before blending
+    /// (see `text_gamma`). `None` for everything else.
+    pub(crate) coverage_table: Option<&'static crate::text_gamma::CoverageTable>,
+
     /// The x position in the destination buffer to draw the texture at
     pub dst_x: isize,
     /// The y position in the destination buffer to draw the texture at

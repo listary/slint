@@ -30,7 +30,8 @@ pub(super) fn draw_texture_line(
         data,
         format,
         pixel_stride,
-        extra: super::SceneTextureExtra { colorize, alpha, rotation, dx, dy, off_x, off_y },
+        extra:
+            super::SceneTextureExtra { colorize, alpha, rotation, dx, dy, off_x, off_y, coverage_table },
     } = *texture;
 
     let source_size = texture.source_size().cast::<i32>();
@@ -90,6 +91,7 @@ pub(super) fn draw_texture_line(
                 data,
                 alpha,
                 colorize,
+                coverage_table,
                 (pixel_stride as usize, dy),
                 #[inline(always)]
                 |bpp| {
@@ -155,6 +157,7 @@ pub(super) fn draw_texture_line(
                 data,
                 alpha,
                 colorize,
+                coverage_table,
                 (stride, dy),
                 #[inline(always)]
                 |_| {
@@ -189,6 +192,8 @@ pub(super) fn draw_texture_line(
         data: &[u8],
         alpha: u8,
         color: Color,
+        // LISTARY PATCH (text-gamma): set for glyphs only, see `text_gamma`.
+        coverage_table: Option<&crate::text_gamma::CoverageTable>,
         (stride, delta): (usize, Fixed<i32, 8>),
         mut pos: impl FnMut(usize) -> (usize, u8, u8),
     ) {
@@ -273,8 +278,11 @@ pub(super) fn draw_texture_line(
             TexturePixelFormat::AlphaMap => {
                 for pix in line_buffer {
                     let pos = pos(1).0;
+                    // LISTARY PATCH (text-gamma): glyph coverage goes through its table first.
+                    let coverage =
+                        coverage_table.map_or(data[pos], |table| table[data[pos] as usize]);
                     let c = PremultipliedRgbaColor::premultiply(Color::from_argb_u8(
-                        ((data[pos] as u16 * alpha as u16) / 255) as u8,
+                        ((coverage as u16 * alpha as u16) / 255) as u8,
                         color.red(),
                         color.green(),
                         color.blue(),

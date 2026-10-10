@@ -23,6 +23,8 @@ mod minimal_software_window;
 mod path;
 mod rounded_clip;
 mod scene;
+// LISTARY PATCH (text-gamma): coverage correction for glyphs.
+mod text_gamma;
 
 use self::draw_functions::BoxShadowCommand;
 use self::fonts::GlyphRenderer;
@@ -2626,6 +2628,8 @@ impl<'a, T: ProcessScene> SceneBuilder<'a, T> {
                         dst_width: target_rect.size.width as _,
                         dst_height: target_rect.size.height as _,
                         rotation: self.rotation.orientation,
+                        // LISTARY PATCH (text-gamma): images are blended as before.
+                        coverage_table: None,
                         tiling,
                     };
 
@@ -2688,6 +2692,8 @@ impl<'a, T: ProcessScene> SceneBuilder<'a, T> {
                         dst_width: target_rect.size.width as _,
                         dst_height: target_rect.size.height as _,
                         rotation: self.rotation.orientation,
+                        // LISTARY PATCH (text-gamma): images are blended as before.
+                        coverage_table: None,
                         tiling,
                     };
 
@@ -2816,6 +2822,8 @@ impl<'a, T: ProcessScene> SceneBuilder<'a, T> {
                                             dy: scale_delta,
                                             off_x: Fixed::try_from_fixed(off_x).unwrap(),
                                             off_y: Fixed::try_from_fixed(off_y).unwrap(),
+                                            // LISTARY PATCH (text-gamma): not for distance fields.
+                                            coverage_table: None,
                                         },
                                     };
                                     self.processor.process_scene_texture(
@@ -2859,6 +2867,8 @@ impl<'a, T: ProcessScene> SceneBuilder<'a, T> {
                             dst_width: target_rect.size.width as _,
                             dst_height: target_rect.size.height as _,
                             rotation: self.rotation.orientation,
+                            // LISTARY PATCH (text-gamma): glyph coverage is corrected for its colour.
+                            coverage_table: text_gamma::table_for(color),
                             tiling: None,
                         };
 
@@ -3468,6 +3478,8 @@ impl<T: ProcessScene> i_slint_core::item_rendering::ItemRenderer for SceneBuilde
                     dst_width: width as _,
                     dst_height: height as _,
                     rotation: self.rotation.orientation,
+                    // LISTARY PATCH (text-gamma): images are blended as before.
+                    coverage_table: None,
                     tiling: None,
                 };
                 self.processor
@@ -3735,6 +3747,8 @@ impl<T: ProcessScene> sharedparley::GlyphRenderer for SceneBuilder<'_, T> {
                 dst_width: target_rect.size.width as _,
                 dst_height: target_rect.size.height as _,
                 rotation: self.rotation.orientation,
+                // LISTARY PATCH (text-gamma): glyph coverage is corrected for its colour.
+                coverage_table: text_gamma::table_for(color),
                 tiling: None,
             };
 

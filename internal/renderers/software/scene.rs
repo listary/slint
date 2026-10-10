@@ -382,6 +382,8 @@ pub struct SceneTextureExtra {
     pub colorize: Color,
     pub alpha: u8,
     pub rotation: RenderingRotation,
+    /// LISTARY PATCH (text-gamma): maps alpha-map coverage before blending; set for glyphs only.
+    pub coverage_table: Option<&'static super::text_gamma::CoverageTable>,
 }
 
 impl SceneTextureExtra {
@@ -441,6 +443,8 @@ impl SceneTextureExtra {
                 dy: Fixed::try_from_fixed(dy).ok()?,
                 off_x: Fixed::try_from_fixed(dx * offset.x).ok()?,
                 off_y: Fixed::try_from_fixed(dy * offset.y).ok()?,
+                // LISTARY PATCH (text-gamma)
+                coverage_table: texture.coverage_table,
             },
             clipped_geometry.to_rect().cast(),
         ))
