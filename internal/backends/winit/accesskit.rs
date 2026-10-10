@@ -79,6 +79,7 @@ impl AccessKitAdapter {
                     },
                 )),
                 text_state: Default::default(),
+                text_state_components: Default::default(),
             },
             global_property_tracker: Box::pin(PropertyTracker::new_with_dirty_handler(
                 AccessibilityPropertyDirtyHandler {
@@ -121,6 +122,8 @@ impl AccessKitAdapter {
             accesskit_winit::WindowEvent::AccessibilityDeactivated => {
                 self.initial_tree_sent = false;
                 self.nodes.text_state.clear_all();
+                // LISTARY PATCH (accesskit-destroyed-during-build): keep the index in step.
+                self.nodes.text_state_components.borrow_mut().clear();
                 None
             }
         }
@@ -211,6 +214,17 @@ impl AccessKitAdapter {
         self.pending_update = true;
 
         self.invoke_later(|self_cell, win| {
+            // LISTARY PATCH (accesskit-destroyed-during-build): bring the item tree up to date
+            // *before* borrowing the adapter. `build_new_tree` does the same instantiation while
+            // the adapter is borrowed, and a component that it destroys there cannot unregister
+            // (`WinitWindowAdapter::unregister_item_tree` only tries to borrow), which left its
+            // weak reference in `components_by_id` until the window was destroyed. Only while a
+            // tree is being served: when nobody is listening, nothing is built either.
+            if self_cell.borrow().initial_tree_sent {
+                if let Some(window_adapter) = win.upgrade() {
+                    WindowInner::from_pub(window_adapter.window()).ensure_tree_instantiated();
+                }
+            }
             let mut self_ = self_cell.borrow_mut();
             let self_ = &mut *self_;
             self_.pending_update = false;
@@ -227,6 +241,8 @@ impl AccessKitAdapter {
             self.nodes.free_component_ids.push(component_id);
         }
         self.nodes.text_state.component_destroyed(component);
+        // LISTARY PATCH (accesskit-destroyed-during-build): keep the index in step.
+        self.nodes.text_state_components.borrow_mut().remove(&component_ptr);
         self.reload_tree();
     }
 
@@ -384,6 +400,10 @@ struct NodeCollection {
     text_state: i_slint_core::item_rendering::ItemCache<
         i_slint_core::textlayout::sharedparley::CachedTextInputAccessibilityState,
     >,
+    /// LISTARY PATCH (accesskit-destroyed-during-build): the components that have entries in
+    /// `text_state`, so that `forget_destroyed_components` clears that state only when one of
+    /// them is gone, not every time a result row is.
+    text_state_components: std::cell::RefCell<std::collections::HashSet<NonNull<u8>>>,
 }
 
 impl NodeCollection {
@@ -439,6 +459,49 @@ impl NodeCollection {
             self.next_component_id += 1;
             id
         })
+    }
+
+    /// LISTARY PATCH (accesskit-destroyed-during-build): drops the entries of components that
+    /// were destroyed without being unregistered.
+    ///
+    /// `unregister_item_tree` is the only other place that removes entries, and it is skipped
+    /// whenever the adapter is already borrowed — which is exactly when the tree is being
+    /// built: instantiation and layout bindings evaluated during the build create and destroy
+    /// repeated components. A skipped entry keeps its `ItemTreeWeak`, and a weak reference keeps
+    /// the component's allocation alive, so every such component stayed in memory until the
+    /// window was destroyed. Running this at every build bounds the leftovers to one build.
+    ///
+    /// Once the allocation is freed its address can be reused, and `text_state` is keyed by that
+    /// address. Its entries cannot be removed per component without a live `ItemTreeRef`, so if
+    /// one of the destroyed components had text input state, the whole state is cleared. That is
+    /// rare: `text_state` only holds components with an exposed `TextInput`, and the repeated
+    /// rows that get destroyed during a build normally have none.
+    fn forget_destroyed_components(&mut self) {
+        let mut destroyed = std::collections::HashSet::new();
+        self.components_by_id.retain(|&component_id, component| {
+            let alive = component.upgrade().is_some();
+            if !alive {
+                destroyed.insert(component_id);
+            }
+            alive
+        });
+        if destroyed.is_empty() {
+            return;
+        }
+        let mut text_state_components = self.text_state_components.borrow_mut();
+        let mut lost_text_state = false;
+        self.component_ids.retain(|component_ptr, component_id| {
+            let alive = !destroyed.contains(component_id);
+            if !alive && text_state_components.remove(component_ptr) {
+                lost_text_state = true;
+            }
+            alive
+        });
+        self.free_component_ids.extend(destroyed);
+        if lost_text_state {
+            self.text_state.clear_all();
+            text_state_components.clear();
+        }
     }
 
     fn encode_item_node_id(&mut self, item: &ItemRc) -> NodeId {
@@ -557,6 +620,10 @@ impl NodeCollection {
         };
         let mut state =
             self.text_state.get_or_update_cache_entry_ref(&inner_item_rc, Default::default);
+        // LISTARY PATCH (accesskit-destroyed-during-build): see `text_state_components`.
+        self.text_state_components
+            .borrow_mut()
+            .insert(ItemTreeRef::as_ptr(ItemTreeRc::borrow(inner_item_rc.item_tree())));
 
         // The inner `TextInput`'s geometry: a `LineEdit` insets it for its border, so measuring
         // from the wrapper's origin would place every TextRun off by the padding.
@@ -646,6 +713,8 @@ impl NodeCollection {
             .collect::<Vec<_>>();
 
         self.all_nodes.clear();
+        // LISTARY PATCH (accesskit-destroyed-during-build): see `forget_destroyed_components`.
+        self.forget_destroyed_components();
         let mut nodes = Vec::new();
 
         let root_id = property_tracker.evaluate_as_dependency_root(|| {

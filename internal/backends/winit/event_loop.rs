@@ -175,6 +175,12 @@ impl winit::application::ApplicationHandler<SlintEvent> for EventLoopState {
             #[cfg(enable_accesskit)]
             CustomEvent::Accesskit(accesskit_winit::Event { window_id, window_event }) => {
                 if let Some(window) = self.shared_backend_data.window_by_id(window_id) {
+                    // LISTARY PATCH (accesskit-destroyed-during-build): instantiate before the
+                    // borrow below, for the reason given in `AccessKitAdapter::reload_tree`.
+                    if matches!(window_event, accesskit_winit::WindowEvent::InitialTreeRequested) {
+                        i_slint_core::window::WindowInner::from_pub(window.window())
+                            .ensure_tree_instantiated();
+                    }
                     let deferred_action = window
                         .accesskit_adapter()
                         .expect("internal error: accesskit adapter must exist when window exists")
