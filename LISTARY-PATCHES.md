@@ -4,7 +4,7 @@
 
 ## `i-slint-core`（`internal/core`）
 
-`internal/core` 相对 v1.18.1 除了下文「上游 PR 回移」那一节，只改了一处：文字排版缓存清扫时，保留缓存条目和它的依赖追踪器，只丢掉排好的字形。v1.18.1 的 `internal/core` 与 crates.io 上 `i-slint-core` 1.18.1 发布包的源码逐文件相同（差别只在发布时规范化的 `Cargo.toml`、cargo 生成的元数据和展开的许可证符号链接）。
+`internal/core` 相对 v1.18.1 除了下文「上游 PR 回移」那一节，改了两处：文字排版缓存清扫时，保留缓存条目和它的依赖追踪器，只丢掉排好的字形；时钟读数比起点早时不再 panic（见本节末「时钟倒退」）。v1.18.1 的 `internal/core` 与 crates.io 上 `i-slint-core` 1.18.1 发布包的源码逐文件相同（差别只在发布时规范化的 `Cargo.toml`、cargo 生成的元数据和展开的许可证符号链接）。
 
 ### 问题
 
@@ -43,9 +43,19 @@
 
 升级 Slint 时先看上游是否已修：`TextLayoutCache::sweep` 如果不再删除带追踪器的条目，或者改由调用方在缓存外读取文字，就可以去掉这份分叉，改回 registry 版本。上面两条测试照常要过。如果还要保留分叉，从新版本的标签拉新分支，再把这两处改动打上去。
 
+### 时钟倒退
+
+`Platform::duration_since_start` 的默认实现（`platform.rs`）断言 `Instant::now()` 不早于第一次读数，否则 panic「The platform's clock is not monotonic!」。Windows 的性能计数器在少数机器上会往回跳一点，有时就在程序刚起来时：Listary 7.1.0.37 里 2 个用户各崩一次，一次在事件循环更新计时器时，一次在启动时建第一个窗口时。
+
+改动：读数比起点早时按「没有经过时间」算（`saturating_duration_since`）。计算挪进一个小函数 `elapsed_since`，带 `LISTARY PATCH (clock-goes-back)` 注释，好写单元测试；`Instant::now()` 本身没法在测试里倒回去。
+
+测试：`platform.rs` 的 `a_clock_that_goes_back_counts_as_no_time_elapsed`（`cargo test -p i-slint-core --lib a_clock_that_goes_back`），改前 panic。
+
+升级：上游 v1.18.1 之后的 master 仍是这句断言（上游把它当成发现坏时钟的手段，见 slint-ui/slint#3491）。上游不改就把这处挑过去。
+
 ## `i-slint-renderer-software`（`internal/renderers/software`）
 
-`internal/renderers/software` 相对 v1.18.1 除了下文「上游 PR 回移」那一节，只改了一处：局部重绘时，`Path` 只画在本次要重画的区域里。
+`internal/renderers/software` 相对 v1.18.1 除了下文「上游 PR 回移」和「圆角裁剪」两节，改了两处：局部重绘时，`Path` 只画在本次要重画的区域里；窗口尺寸和缓冲区对不上时不再 panic（见本节末「窗口尺寸大过缓冲区」）。
 
 ### 问题
 
@@ -70,6 +80,28 @@
 ### 升级
 
 升级 Slint 时先看上游的 `RenderToBuffer` 画路径时是否已按重画区域裁剪；已经裁剪的，就去掉这处补丁。上面两条测试照常要过。
+
+### 窗口尺寸大过缓冲区
+
+`SoftwareRenderer::render` 按「窗口元素的逻辑尺寸 × 当前缩放」定这一帧的大小，再断言缓冲区装得下，装不下就 panic「buffer of size … is too small to handle a window of size …」；这一步把浮点尺寸转成 16 位整数时，遇到 NaN 或超出范围还会先在 `cast().unwrap()` 上 panic。winit 后端的软件渲染（`renderer/sw.rs`）按原生窗口的物理尺寸给缓冲区，而 Windows 的 DPI 变化是先报新缩放、后报新尺寸：
+
+- 两者之间来一次 `WM_PAINT`，就按旧逻辑尺寸 × 新缩放要画面，缓冲区还是旧物理尺寸。
+- 最大化或全屏的窗口，winit 处理 `WM_DPICHANGED` 时不改窗口大小（`allow_resize` 为假），不会再有 `Resized`；winit 后端的 `ScaleFactorChanged` 分支也不重设逻辑尺寸（上游那里是一句 TODO）。这样的窗口此后每次重绘都对不上。
+
+Listary 7.1.0.37 里断言 4 次、转换 3 次，共 4 个用户；倍数正好是一次缩放变化（160×28 → 240×42 是 ×1.5，2560×1368 → 3072×1641 是 ×1.2），两例接近整块工作区，像最大化的窗口。
+
+改动（`lib.rs` 的 `render_buffer_impl`，`LISTARY PATCH (render-size-fits-buffer)`）：
+
+- 帧尺寸按缓冲区的宽高截断，只画装得下的部分；尺寸跟上之后的下一帧照常整窗画。
+- 尺寸是 NaN 或超出 16 位范围时跳过这一帧：后面画各个元素时同样的转换也会失败。
+
+没改的：最大化窗口在 DPI 变化后，逻辑尺寸仍是旧的，所以画出来的是按旧逻辑尺寸排版、截到缓冲区的画面，直到窗口再改大小。根治要在 winit 后端的 `ScaleFactorChanged` 分支里按当前物理尺寸重设逻辑尺寸，那需要真窗口最大化后再测，没放在这里。
+
+测试：`api/rs/slint/tests/render_size_fits_buffer.rs`（`cargo test -p slint --no-default-features --features std,compat-1-2,renderer-software --test render_size_fits_buffer`）。`MinimalSoftwareWindow` 160×28：先发缩放 1.5、不改尺寸，160×28 的缓冲区要整幅画满；再发 40000 宽和 NaN 的尺寸，不 panic、不画；尺寸恢复后整幅画满。改前前两种分别 panic 在断言和转换上，消息和线上相同。
+
+这个测试不能带默认特性跑：slint 的开发依赖给软件渲染器开了 `testing` 特性，它的同名公开方法 `text_layout_cache` 会挡住 `sw.rs` 里对 `RendererSealed::text_layout_cache` 的调用，winit 后端编译不过。这是本分支原有的问题，与这处补丁无关。
+
+升级：上游 master 仍是这句断言。上游不改就把这处挑过去。
 
 ## 上游 PR 回移：软件渲染器画 `drop-shadow-*`（slint-ui/slint#13758）
 
