@@ -152,7 +152,7 @@ v1.18.1 的软件渲染器对 `clip: true` 只按外接矩形裁，`border-radiu
 版本号保持 `1.18.1`,通过 `[patch.crates-io]` 顶替 registry 版本,锁文件里不出现第二个
 版本,`slint = "=1.18.1"` 的精确钉版纪律不受影响。与上游不同的文件只有 `lib.rs`、
 `winitwindowadapter.rs`、`event_loop.rs`、`frame_throttle.rs`、`accesskit.rs`、`renderer/sw.rs`
-和新增的 `renderer/ulw.rs`,共 41 行带 `LISTARY PATCH` 标记;其余文件与上游 1.18.1 逐字相同。
+和新增的 `renderer/ulw.rs`,共 43 行带 `LISTARY PATCH` 标记;其余文件与上游 1.18.1 逐字相同。
 
 > **260907**:曾经还有第四处 —— 批 6 的 W1 二分诊断开关(`accesskit.rs`,260906),让
 > accesskit 适配器可以不建。二分矩阵跑完后它已删除,`accesskit.rs` 回到上游 1.17.1 的
@@ -181,7 +181,7 @@ v1.18.1 的软件渲染器对 `clip: true` 只按外接矩形裁，`border-radiu
 | `winitwindowadapter.rs`(+约 70 行,`LISTARY PATCH (R-89)` 标记) | ① `set_position` / `resize_window` 对 ULW 窗**不走 winit**(原点截存 + 同步派发 `Resized`);② `map_native_window` 单点(ULW 窗走裸 `ShowWindow`,绕开 winit 的 flag diff),每次显示先画一帧再映射;③ `ensure_window` 尾部的 `set_enabled_buttons` 对 ULW 窗跳过;④ `set_visibility` 的首帧预画对 ULW 窗跳过(交给 ②,免得首次显示画两遍);⑤ 原生窗建出来之前隐藏时,把待建属性的 `visible` 清回 false(普通窗经 `set_visible` 本来就清;不清的话建窗前「显示 → 隐藏」会在建窗时被重新映射);⑥ 已经呈现过的 ULW 窗收到系统报来的 `Resized` 时不改 Slint 记的尺寸,缩放变化时随新缩放一起改尺寸(`keeps_own_size`,见 §二点五「系统报来的尺寸」) |
 | `renderer/sw.rs`(约 +270 行,均带 `LISTARY PATCH (R-31)` 标记) | ① `NotifyingSoftwareRenderer` 包装 + 生命周期触发点,转发 `RendererSealed` 的全部方法;② 全量 present(废弃按脏矩形 present) |
 | `winitwindowadapter.rs`、`event_loop.rs`、`frame_throttle.rs`(`LISTARY PATCH (T-14)` 标记) | 隐藏窗停止帧定时器续跑、按窗补充重绘,见 §七 |
-| `accesskit.rs`、`event_loop.rs`(`LISTARY PATCH (accesskit-destroyed-during-build)` 标记) | 建无障碍树前先实例化组件树;每次建树清掉已销毁组件的弱引用,见 §八 |
+| `accesskit.rs`、`event_loop.rs`(`LISTARY PATCH (accesskit-destroyed-during-build)` 标记) | 建无障碍树前先实例化组件树;每次建树清掉已销毁组件的弱引用,见 §八。同一处先实例化也挡住了 AccessKit 重入崩溃(`LISTARY PATCH (accesskit-reentrant-getobject)` 注释 2 行),见 §八点一 |
 
 原来还有一行 `LISTARY PATCH (260820)`:`handle_focus_change` 的 `borrow_mut()` 改 `try_borrow_mut`,
 防无障碍客户端发 Focus 动作时重入 panic。1.18.1 上游已经是 `try_borrow_mut`,升版时删除。
@@ -526,3 +526,35 @@ headless 测试里造不出来。验证靠实测:有 UIA 客户端时文件搜�
 
 **升级**:升版时先看上游是否已修:`unregister_item_tree` 在借用冲突时仍能清掉 `components_by_id` 的条目,
 或建树改在借用之外实例化,就删掉这几处。
+
+### 八点一、AccessKit 重入崩溃（同一处修法）
+
+**现象**:有 UI 自动化客户端时,新窗口一打开程序就崩,panic 在 `accesskit_windows-0.34.0/src/subclass.rs:51`
+「RefCell already borrowed」。Listary 7.1.0.37 里是首次启动向导,5 次 / 4 个用户,栈里都有输入法(TSF)的帧。
+
+**成因**(上游 1.18.1 原样如此):
+- 处理 `InitialTreeRequested` 时,AccessKit 的 `update_if_active` 借着自己的窗口状态(`SubclassImpl::state`)
+  调 `build_new_tree`;建树开头的 `ensure_tree_instantiated()` 会跑还没跑的 change handler。
+- 向导根上 `forward-focus` 的初始聚焦就是这样一个 handler:设焦点让 winit 打开输入法(`set_ime_allowed` →
+  `ImmAssociateContextEx`),输入法在 `PeekMessage` 里把 `WM_GETOBJECT` 派回同一个窗口,AccessKit 的窗口过程
+  再借一次同一个状态,panic。`WM_SETFOCUS`/`WM_KILLFOCUS` 派回来也一样。
+- 只改 AccessKit 不行:它在 `update_if_active` 里本来就假定回调不会重入窗口过程,本分叉不另带 accesskit 的分叉。
+
+**修法**:就是 §八 第 1 条「借用之前先实例化」。`event_loop.rs` 在处理 `InitialTreeRequested` 前、`reload_tree`
+的延迟回调在借用前,都先 `ensure_tree_instantiated()`;待跑的 handler 在 AccessKit 借用之外跑完,建树时就没有
+handler 可跑了。两处注释补了这个理由(`LISTARY PATCH (accesskit-reentrant-getobject)`),免得以后只按泄漏的
+理由取舍时把它删掉。
+
+**为什么应用侧绕不开**:触发条件是外部客户端在窗口初始化跑完之前请求无障碍树,应用无法控制它何时到来;
+建树在后端内部借用里进行,公开接口没有在它之前跑 handler 的入口。把向导的初始聚焦挪走只能避开这一个窗口,
+任何会在 handler 里设焦点的窗口都一样。
+
+**测试**:`internal/backends/winit/tests/accesskit_reentrant_getobject.rs`(Windows,要 `accessibility` 特性,
+开一个不抢前台的 100×100 窗口):
+`cargo test -p i-slint-backend-winit --features accessibility,renderer-software --test accesskit_reentrant_getobject`。
+测试给窗口发 `WM_GETOBJECT(UiaRootObjectId)`,AccessKit 就像有 UIA 客户端一样请求初始树,不需要真的客户端;
+同一个回合改一个属性,让它的 change handler 待跑,handler 里再发一次 `WM_GETOBJECT`,代替输入法抽消息。
+去掉 `event_loop.rs` 那处先实例化时,panic 与线上相同(`subclass.rs:51`,经 `build_new_tree` →
+`ensure_tree_instantiated`);有它时通过。§八 说「headless 造不出 UIA 客户端」,这个办法也可以用来给泄漏写测试。
+
+**升级**:同 §八。上游若改成在借用之外建树或实例化,这条测试照常要过。

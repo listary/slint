@@ -175,3 +175,7 @@ harness = false
 [[test]]
 name = "hide_with_external_reference"
 harness = false
+
+[[test]]
+name = "accesskit_reentrant_getobject"
+harness = false

@@ -177,6 +177,8 @@ impl winit::application::ApplicationHandler<SlintEvent> for EventLoopState {
                 if let Some(window) = self.shared_backend_data.window_by_id(window_id) {
                     // LISTARY PATCH (accesskit-destroyed-during-build): instantiate before the
                     // borrow below, for the reason given in `AccessKitAdapter::reload_tree`.
+                    // LISTARY PATCH (accesskit-reentrant-getobject): and so that pending change
+                    // handlers do not run inside `update_if_active`; see the same place.
                     if matches!(window_event, accesskit_winit::WindowEvent::InitialTreeRequested) {
                         i_slint_core::window::WindowInner::from_pub(window.window())
                             .ensure_tree_instantiated();
