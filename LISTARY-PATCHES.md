@@ -184,7 +184,7 @@ v1.18.1 的软件渲染器对 `clip: true` 只按外接矩形裁，`border-radiu
 版本号保持 `1.18.1`,通过 `[patch.crates-io]` 顶替 registry 版本,锁文件里不出现第二个
 版本,`slint = "=1.18.1"` 的精确钉版纪律不受影响。与上游不同的文件只有 `lib.rs`、
 `winitwindowadapter.rs`、`event_loop.rs`、`frame_throttle.rs`、`accesskit.rs`、`renderer/sw.rs`
-和新增的 `renderer/ulw.rs`,共 43 行带 `LISTARY PATCH` 标记;其余文件与上游 1.18.1 逐字相同。
+和新增的 `renderer/ulw.rs`,共 44 行带 `LISTARY PATCH` 标记;其余文件与上游 1.18.1 逐字相同。
 
 > **260907**:曾经还有第四处 —— 批 6 的 W1 二分诊断开关(`accesskit.rs`,260906),让
 > accesskit 适配器可以不建。二分矩阵跑完后它已删除,`accesskit.rs` 回到上游 1.17.1 的
@@ -590,3 +590,31 @@ handler 可跑了。两处注释补了这个理由(`LISTARY PATCH (accesskit-ree
 `ensure_tree_instantiated`);有它时通过。§八 说「headless 造不出 UIA 客户端」,这个办法也可以用来给泄漏写测试。
 
 **升级**:同 §八。上游若改成在借用之外建树或实例化,这条测试照常要过。
+
+## 九、最大化窗口换 DPI（`scale-without-resize`）
+
+**现象**:最大化或全屏的窗口换到缩放不同的显示器、或改系统缩放后,窗口被还原成非最大化,尺寸变成
+「旧逻辑尺寸 × 新缩放」;在这之前的一帧,软件渲染按旧逻辑尺寸 × 新缩放要画面,缓冲区还是旧物理尺寸
+(以前直接断言崩溃,见软件渲染器一节的「窗口尺寸大过缓冲区」)。
+
+**成因**(上游 1.18.1 原样如此):
+- winit 处理 `WM_DPICHANGED` 时,对最大化或全屏的窗口不改尺寸(`allow_resize` 为假),之后不会有 `Resized`。
+- 后端的 `ScaleFactorChanged` 分支只改缩放,窗口元素仍是旧逻辑尺寸(上游那里是一句 TODO)。
+- 下一次同步窗口属性时,`update_window_properties` 把这个旧逻辑尺寸当成窗口应有的尺寸,
+  `resize_window` → winit `request_inner_size`,原生窗口被改大小,winit 顺带去掉最大化。
+
+**修法**(`winitwindowadapter.rs` 的 `ScaleFactorChanged` 分支,`LISTARY PATCH (scale-without-resize)`):
+窗口是最大化或全屏、又没有待交给 winit 的尺寸请求时,按不变的物理尺寸和新缩放立刻重算逻辑尺寸
+(`resize_event`)。这正是 winit 不改尺寸的那几种情况;普通窗口照旧等 winit 报来的新尺寸,不多排一次版。
+原子呈现窗走自己的 `keeps_own_size` 分支,不受影响。
+
+**为什么应用侧绕不开**:缩放变化和随后的窗口属性同步都在后端内部、同一次事件处理里发生,应用在中间
+没有入口;应用事后再设尺寸也晚了,窗口已经被还原。
+
+**测试**:`internal/backends/winit/tests/dpi_change_keeps_size.rs`(Windows,开一个不抢前台的小窗):
+`cargo test -p i-slint-backend-winit --features renderer-software --test dpi_change_keeps_size`。
+先发一条 `SIZE_MAXIMIZED` 的 `WM_SIZE` 让 winit 记成最大化(窗口不真的最大化),再直接发 `WM_DPICHANGED`。
+修前窗口被还原、尺寸从 150×120 变成 200×160;修后仍是最大化、150×120,逻辑尺寸 75×60。
+真最大化窗口换 DPI 要在桌面上另验。
+
+**升级**:上游若在 `ScaleFactorChanged` 里补上那句 TODO(没有 `Resized` 时按新缩放重设逻辑尺寸),就去掉这处。

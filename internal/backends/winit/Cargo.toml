@@ -179,3 +179,7 @@ harness = false
 [[test]]
 name = "accesskit_reentrant_getobject"
 harness = false
+
+[[test]]
+name = "dpi_change_keeps_size"
+harness = false
