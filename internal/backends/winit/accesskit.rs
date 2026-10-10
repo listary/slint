@@ -220,6 +220,10 @@ impl AccessKitAdapter {
             // (`WinitWindowAdapter::unregister_item_tree` only tries to borrow), which left its
             // weak reference in `components_by_id` until the window was destroyed. Only while a
             // tree is being served: when nobody is listening, nothing is built either.
+            // LISTARY PATCH (accesskit-reentrant-getobject): the instantiation also runs pending
+            // change handlers. One that moves the focus makes winit enable the input method, which
+            // pumps messages and can deliver `WM_GETOBJECT` to this window; inside AccessKit's
+            // `update_if_active` that borrows AccessKit's window state twice and panics.
             if self_cell.borrow().initial_tree_sent {
                 if let Some(window_adapter) = win.upgrade() {
                     WindowInner::from_pub(window_adapter.window()).ensure_tree_instantiated();
