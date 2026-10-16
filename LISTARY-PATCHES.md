@@ -204,13 +204,14 @@ v1.18.1 的软件渲染器不做 hinting，按轮廓原样画字，字号还截�
 
 - `fonts/vectorfont/hinting.rs`（新文件）：每个字体、每个字号怎么画，照 DirectWrite 推荐渲染模式的规则，从字体自己的 `gasp` 表定（在 Windows 11 上逐个字体、逐个字号用 `IDWriteFontFace3::GetRecommendedRenderingMode` 核对过）：
   - 字号先四舍五入成整数 ppem 再查表。
-  - 有「对称平滑」标志就竖直方向抗锯齿；这时看「对称网格对齐」标志决定 hint 不 hint。没有就竖直方向不抗锯齿，看「网格对齐」标志。
-  - 没有 `gasp` 的字体：hint，20 px 以下竖直方向不抗锯齿，以上抗锯齿。既没有 `gasp` 也没有 `fpgm`/`prep` 的字体照旧不 hint。
+  - hint 不 hint、竖直方向抗锯齿不抗锯齿是两个独立的开关：「对称网格对齐」标志决定 hint，「对称平滑」标志决定竖直抗锯齿。「网格对齐」「灰度」两个老标志 DirectWrite 灰度模式不看（MV Boli 只有「网格对齐」，DirectWrite 照样不 hint）。
+  - 两个开关都关的档要单独画：不 hint 的轮廓，竖直方向不抗锯齿（Roboto 8 ppem 以下、MV Boli 所有字号）。竖直方向按整数 ppem 缩放轮廓再取样，DirectWrite 的落行是这样（MV Boli 16.25 px 的数字落 11 行，跟 16 px 一样）。
+  - 没有 `gasp` 或者只有 0 版 `gasp`（0 版没有对称标志，DirectWrite 当作没有，如 Agency FB、Arial Bold）：hint，20 ppem 以下竖直方向不抗锯齿，以上抗锯齿。
   - CFF 轮廓照旧不 hint：skrifa 的 CFF hint 和 DirectWrite 的结果对不上。
   - hint 用 skrifa 的 TrueType 解释器（`SmoothMode::Normal`，保留线性度量），只在竖直方向起作用。
-  - 竖直不抗锯齿时，每行只在行中线取一次样，横向算精确覆盖率（曲线拆成直线，非零环绕规则）。竖直抗锯齿时用 zeno 照常栅格化。
-  - `HintingInstance` 按「字体、字号（1/64 px）、可变参数」缓存，最多 48 个，用得最少的先丢。雅黑 UI 一个约 4.2 KiB。
-- `fonts/vectorfont.rs`：`VectorFont` 加 `with_exact_pixel_size`，字形按小数字号画；字形缓存键的字号改成 1/64 px，和实际画的字号一致。不 hint 的字号照旧走 swash。
+  - 竖直不抗锯齿时，每行只在行中线取一次样，横向算精确覆盖率（曲线拆成直线，非零环绕规则）。坐标不是有限值或者位图超过 4M 像素时不画，交回 swash。竖直抗锯齿又 hint 时用 zeno 照常栅格化。
+  - `HintingInstance` 按「字体、字号（1/64 px）、可变参数」缓存，最多 48 个，用得最少的先丢。
+- `fonts/vectorfont.rs`：`VectorFont` 加 `with_exact_pixel_size`，字形按小数字号画。字号先取整到 1/64 px，字形缓存键、hint 缓存键、分档判断、hint 和 swash 都用这同一个字号，所以共用缓存的两个字号画出来一定一样。不 hint 又竖直抗锯齿的字号照旧走 swash。
 - `lib.rs`：`draw_glyph_run` 把小数字号传给 `VectorFont`。
 
 GL 渲染器（femtovg）没有改，macOS 产品窗口不受影响。
@@ -218,18 +219,19 @@ GL 渲染器（femtovg）没有改，macOS 产品窗口不受影响。
 ### 代价（Notebook 实测，release）
 
 - 雅黑 UI 每个字第一次画：hint 的字号约 8–9.5 µs，原来不 hint 约 3.4–4.4 µs；不 hint 的字号（22 px 以上）不变。一屏约 200 个不同字形，按单字耗时算冷缓存多约 1 ms；缓存命中时不变。
-- 内存：`HintingInstance` 最多 48 个，约 0.2 MiB 封顶；字形缓存照旧按约 1 MiB 像素封顶。
+- 内存：`HintingInstance` 最多 48 个。雅黑 UI 实测一个约 4.2 KiB，48 个约 0.2 MiB；别的字体一个多大取决于它的 hint 程序，没有逐个测。字形缓存照旧按约 1 MiB 像素封顶。
 
 ### 测试
 
-- `hinting.rs` 的单元测试：分档规则（雅黑、Segoe UI、只要平滑的字体、没有 `gasp` 的字体）；行中线栅格化的横向覆盖率、子像素偏移、落不到行中线的细笔、重叠轮廓和镂空。
-- `hinted_rows_match_directwrite_for_the_windows_ui_fonts`（只在 Windows 上跑）：拿 `directwrite_rows.txt` 里 DirectWrite 灰度的落行数据对照，8 种字体、8 个字号、共 4648 个字形。竖直不抗锯齿的字号，每种字体至少 98% 的字形落在同样的行上（实测 98.6–100%）；竖直抗锯齿的字号阈值上下的淡边可能落在不同一侧，至少 70%（实测 75–100%，最低的是雅黑 22.5 px，那里照旧不 hint）。逐像素的灰度值不同：DirectWrite 的灰度只有 8 级，横向也更虚。参考数据用自写的 DirectWrite 小程序生成。
+- `hinting.rs` 的单元测试：分档规则（各种标志组合，含全关、只有灰度、只有网格对齐，以及没有 `gasp`、0 版 `gasp`）；同一缓存里共用 1/64 px 的两个字号不论谁先画结果都一样（Roboto 8.49/8.496/8.5，跨 8、9 ppem 两档）；两个开关都关的档画出整行；行中线栅格化的横向覆盖率、子像素偏移、落不到行中线的细笔、重叠轮廓和镂空、非有限坐标和超大位图交回 swash。
+- `hinted_rows_match_directwrite_for_the_windows_ui_fonts`（只在 Windows 上跑，一种字体都没装就失败）：拿 `directwrite_rows.txt` 里 DirectWrite 灰度的落行数据对照，雅黑、正黑、游哥特、Malgun、Segoe UI、Nirmala、Arial Rounded、Segoe UI Variable 各 8 个字号，加上 Roboto、MV Boli、Agency FB、Javanese Text、Arial 各 10 个字号。竖直不抗锯齿的字号，9 ppem 起每种字体至少 97% 的字形落在同样的行上（实测 97.3–100%，最低的是 MV Boli，hint 过的字体都在 98.6% 以上）；9 ppem 以下至少 80%（实测 83–95%，见已知差异）。竖直抗锯齿的字号阈值上下的淡边可能落在不同一侧，至少 70%（实测 75–100%，最低的是雅黑 22.5 px，那里照旧不 hint）。逐像素的灰度值不同：DirectWrite 的灰度只有 8 级，横向也更虚。参考数据用自写的 DirectWrite 小程序生成。
 - 本分支原有的软件渲染器测试照常要过。
 
 ### 已知差异
 
 - 斜笔、撇捺在竖直方向不抗锯齿，有台阶，跟 7.0 和 DirectWrite 一样。
 - 和 7.0 一样，小字号上有的汉字顶或底比同行差一行（hint 本身的结果，DirectWrite 也一样）。
+- 9 ppem 以下竖直不抗锯齿时，落在两个行中线之间的细横笔会丢，DirectWrite 会补一行（TrueType 的漏点控制）。试过按列补点，跟 DirectWrite 对得反而更差，没有做。界面字号不到这么小。
 
 ### 升级
 

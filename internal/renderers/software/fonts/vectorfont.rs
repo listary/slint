@@ -179,9 +179,10 @@ impl VectorFont {
     }
 
     // LISTARY PATCH (glyph-hinting)
-    /// Draws glyphs at `size` pixels instead of the whole-pixel size the font was created with.
+    /// Draws glyphs at `size` pixels, rounded to 1/64 pixels, instead of the whole-pixel size
+    /// the font was created with.
     pub fn with_exact_pixel_size(mut self, size: f32) -> Self {
-        self.exact_pixel_size = size;
+        self.exact_pixel_size = hinting::size_64(size) as f32 / 64.0;
         self
     }
 
@@ -197,7 +198,7 @@ impl VectorFont {
             let cache_key = GlyphCacheKey {
                 font_blob_id: self.font_blob.id(),
                 font_index: self.font_index,
-                size_64: (self.exact_pixel_size * 64.0).round() as u32,
+                size_64: hinting::size_64(self.exact_pixel_size),
                 glyph_id,
                 coords_hash: self.coords_hash,
                 subpixel_bin,

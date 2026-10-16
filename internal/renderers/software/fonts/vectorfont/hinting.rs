@@ -8,66 +8,65 @@ use alloc::rc::Rc;
 use alloc::vec::Vec;
 use skrifa::instance::{LocationRef, NormalizedCoord, Size};
 use skrifa::outline::{
-    Engine, HintingInstance, HintingOptions, OutlineGlyphFormat, OutlinePen, SmoothMode, Target,
+    DrawSettings, Engine, HintingInstance, HintingOptions, OutlineGlyphFormat, OutlinePen,
+    SmoothMode, Target,
 };
 use skrifa::raw::TableProvider;
-use skrifa::raw::tables::gasp::GaspRangeBehavior;
+use skrifa::raw::tables::gasp::{Gasp, GaspRangeBehavior};
 use skrifa::{GlyphId, MetadataProvider};
 use swash::zeno::{Command, Format, Mask, Origin, Placement, Vector};
 
 /// How a font draws at one size.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Rasterization {
-    /// The outline as designed, smoothed in both directions.
-    Unhinted,
-    /// The outline grid-fitted by the font's TrueType instructions in the vertical direction.
-    /// Without `vertical_smoothing`, each pixel row takes the coverage along its center line,
-    /// so a fitted horizontal stroke fills whole rows.
-    Hinted { vertical_smoothing: bool },
+pub struct Rasterization {
+    /// The font's TrueType instructions fit the outline to the pixel grid vertically.
+    pub hinted: bool,
+    /// Each pixel row takes the coverage of the whole row. Without it, a row takes the coverage
+    /// along its center line, so a horizontal stroke on whole rows fills them.
+    pub vertical_smoothing: bool,
 }
 
-/// No `gasp` table: DirectWrite smooths vertically from this size up.
-const NO_GASP_SMOOTHING_ABOVE: f32 = 20.0;
+/// The outline as designed, smoothed in both directions.
+const UNHINTED_SMOOTHED: Rasterization = Rasterization { hinted: false, vertical_smoothing: true };
 
-/// The rendering DirectWrite recommends for a font at `size` pixels, given the behavior flags
-/// its `gasp` table lists for that size (`None` when the font has no `gasp`).
+/// Without `gasp` flags DirectWrite smooths vertically above this many pixels per em.
+const NO_GASP_SMOOTHING_ABOVE_PPEM: u16 = 20;
+
+/// The rendering DirectWrite's grayscale mode recommends for a font at `ppem` pixels per em,
+/// given the `gasp` flags for that size (`None` without a version 1 `gasp` table).
 ///
-/// The size is rounded to whole pixels per em before the lookup. With vertical smoothing
-/// the font is grid-fitted when the flags ask for symmetric grid-fitting, without it when they
-/// ask for plain grid-fitting.
-pub fn rasterization_for(gasp: Option<GaspRangeBehavior>, size: f32) -> Rasterization {
-    let Some(flags) = gasp else {
-        return Rasterization::Hinted { vertical_smoothing: size > NO_GASP_SMOOTHING_ABOVE };
-    };
-    let vertical_smoothing = flags.contains(GaspRangeBehavior::GASP_SYMMETRIC_SMOOTHING);
-    let grid_fit = if vertical_smoothing {
-        flags.contains(GaspRangeBehavior::GASP_SYMMETRIC_GRIDFIT)
-    } else {
-        flags.contains(GaspRangeBehavior::GASP_GRIDFIT)
-    };
-    if grid_fit { Rasterization::Hinted { vertical_smoothing } } else { Rasterization::Unhinted }
+/// DirectWrite reads only the symmetric flags, so it ignores version 0 tables, which lack them.
+/// Plain grid-fitting and grayscale don't matter.
+pub fn rasterization_for(gasp: Option<GaspRangeBehavior>, ppem: u16) -> Rasterization {
+    match gasp {
+        None => {
+            Rasterization { hinted: true, vertical_smoothing: ppem > NO_GASP_SMOOTHING_ABOVE_PPEM }
+        }
+        Some(flags) => Rasterization {
+            hinted: flags.contains(GaspRangeBehavior::GASP_SYMMETRIC_GRIDFIT),
+            vertical_smoothing: flags.contains(GaspRangeBehavior::GASP_SYMMETRIC_SMOOTHING),
+        },
+    }
 }
 
-fn gasp_flags(font: &skrifa::FontRef, ppem: u16) -> Option<GaspRangeBehavior> {
-    let gasp = font.gasp().ok()?;
+fn gasp_flags(gasp: Option<Gasp>, ppem: u16) -> Option<GaspRangeBehavior> {
+    let gasp = gasp.filter(|gasp| gasp.version() >= 1)?;
     let range = gasp.gasp_ranges().iter().find(|range| ppem <= range.range_max_ppem());
     Some(range.map_or(GaspRangeBehavior::empty(), |range| range.range_gasp_behavior()))
 }
 
-/// Only TrueType outlines that carry instructions are hinted; CFF outlines and fonts without
-/// a font or control-value program draw unhinted, as before.
+/// CFF outlines draw unhinted and smoothed, as before.
 fn rasterization(font: &skrifa::FontRef, size: f32) -> Rasterization {
-    let outlines = font.outline_glyphs();
-    if outlines.format() != Some(OutlineGlyphFormat::Glyf) {
-        return Rasterization::Unhinted;
+    if font.outline_glyphs().format() != Some(OutlineGlyphFormat::Glyf) {
+        return UNHINTED_SMOOTHED;
     }
-    let gasp = gasp_flags(font, size.round().clamp(0.0, u16::MAX as f32) as u16);
-    let has_program =
-        |tag: &[u8; 4]| font.data_for_tag(skrifa::raw::types::Tag::new(tag)).is_some();
-    if gasp.is_none() && !has_program(b"fpgm") && !has_program(b"prep") {
-        return Rasterization::Unhinted;
-    }
-    rasterization_for(gasp, size)
+    let ppem = size.round().clamp(0.0, u16::MAX as f32) as u16;
+    rasterization_for(gasp_flags(font.gasp().ok(), ppem), ppem)
+}
+
+/// Glyph sizes in 1/64 pixels. Glyphs are cached and drawn at the size this rounds to.
+pub fn size_64(size: f32) -> u32 {
+    (size * 64.0).round() as u32
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -107,26 +106,32 @@ fn hinting(
             return hinting;
         }
         let rasterization = rasterization(font, size);
-        let instance = match rasterization {
-            Rasterization::Unhinted => None,
-            Rasterization::Hinted { vertical_smoothing } => HintingInstance::new(
-                &font.outline_glyphs(),
-                Size::new(size),
-                LocationRef::new(coords),
-                HintingOptions {
-                    engine: Engine::Interpreter,
-                    target: Target::Smooth {
-                        mode: SmoothMode::Normal,
-                        symmetric_rendering: vertical_smoothing,
-                        preserve_linear_metrics: true,
+        let instance = rasterization
+            .hinted
+            .then(|| {
+                HintingInstance::new(
+                    &font.outline_glyphs(),
+                    Size::new(size),
+                    LocationRef::new(coords),
+                    HintingOptions {
+                        engine: Engine::Interpreter,
+                        target: Target::Smooth {
+                            mode: SmoothMode::Normal,
+                            symmetric_rendering: rasterization.vertical_smoothing,
+                            preserve_linear_metrics: true,
+                        },
                     },
-                },
-            )
-            .ok(),
-        };
+                )
+                .ok()
+            })
+            .flatten();
         let hinting = Rc::new(Hinting {
-            // A font whose program fails to run draws unhinted.
-            rasterization: if instance.is_some() { rasterization } else { Rasterization::Unhinted },
+            // A font whose program fails to run draws as designed.
+            rasterization: if rasterization.hinted && instance.is_none() {
+                UNHINTED_SMOOTHED
+            } else {
+                rasterization
+            },
             instance,
         });
         if instances.len() >= MAX_INSTANCES {
@@ -137,8 +142,9 @@ fn hinting(
     })
 }
 
-/// The glyph's coverage when the font is hinted at this size, `None` when it draws unhinted
-/// (the caller then renders the plain outline).
+/// The glyph's coverage at `size` rounded to 1/64 pixels, see `size_64`.
+/// Returns `Some(None)` when the font draws as designed and smoothed at this size,
+/// and `None` when the glyph can't be drawn here; the caller renders the plain outline then.
 pub fn render_hinted(
     data: &[u8],
     font_index: u32,
@@ -152,18 +158,20 @@ pub fn render_hinted(
     let font = skrifa::FontRef::from_index(data, font_index).ok()?;
     let coords: Vec<NormalizedCoord> =
         normalized_coords.iter().map(|&c| NormalizedCoord::from_bits(c)).collect();
-    let key =
-        InstanceKey { font_blob_id, font_index, size: (size * 64.0).round() as u32, coords_hash };
+    let key = InstanceKey { font_blob_id, font_index, size: size_64(size), coords_hash };
+    let size = key.size as f32 / 64.0;
     let hinting = hinting(&font, key, size, &coords);
-    let (Rasterization::Hinted { vertical_smoothing }, Some(instance)) =
-        (hinting.rasterization, hinting.instance.as_ref())
-    else {
+    if hinting.rasterization == UNHINTED_SMOOTHED {
         return Some(None);
+    }
+    let settings: DrawSettings = match &hinting.instance {
+        Some(instance) => instance.into(),
+        None => DrawSettings::unhinted(Size::new(size), LocationRef::new(&coords)),
     };
     let glyph = font.outline_glyphs().get(GlyphId::new(glyph_id as u32))?;
-    if vertical_smoothing {
+    if hinting.rasterization.vertical_smoothing {
         let mut pen = ZenoPen(Vec::new());
-        glyph.draw(instance, &mut pen).ok()?;
+        glyph.draw(settings, &mut pen).ok()?;
         let offset = Vector::new(offset_x, 0.0);
         return Some(Some(
             Mask::new(&pen.0[..])
@@ -176,8 +184,13 @@ pub fn render_hinted(
         ));
     }
     let mut pen = FlatteningPen::default();
-    glyph.draw(instance, &mut pen).ok()?;
-    Some(Some(rasterize_row_centers(&pen.edges, offset_x)))
+    glyph.draw(settings, &mut pen).ok()?;
+    if hinting.instance.is_none() {
+        // Unhinted, DirectWrite places rows as at the whole pixels per em.
+        let y_scale = size.round() / size;
+        pen.edges.iter_mut().for_each(|e| (e[1], e[3]) = (e[1] * y_scale, e[3] * y_scale));
+    }
+    Some(Some(rasterize_row_centers(&pen.edges, offset_x)?))
 }
 
 struct ZenoPen(Vec<Command>);
@@ -270,12 +283,20 @@ impl OutlinePen for FlatteningPen {
     }
 }
 
+/// The largest bitmap `rasterize_row_centers` makes, in pixels.
+const MAX_ROW_CENTER_PIXELS: usize = 1 << 22;
+
 /// Fills the outline with the nonzero rule, one sample per pixel row at the row's center
 /// line and exact coverage across. Rows are counted up from the baseline, as in `Placement`.
-fn rasterize_row_centers(edges: &[[f32; 4]], offset_x: f32) -> (Vec<u8>, Placement) {
+/// Returns `None` for an outline with points that aren't finite or a bitmap over
+/// `MAX_ROW_CENTER_PIXELS`.
+fn rasterize_row_centers(edges: &[[f32; 4]], offset_x: f32) -> Option<(Vec<u8>, Placement)> {
     let empty = (Vec::new(), Placement { left: 0, top: 0, width: 0, height: 0 });
     if edges.is_empty() {
-        return empty;
+        return Some(empty);
+    }
+    if !offset_x.is_finite() || edges.iter().flatten().any(|v| !v.is_finite()) {
+        return None;
     }
     let (mut x_min, mut x_max, mut y_min, mut y_max) = (f32::MAX, f32::MIN, f32::MAX, f32::MIN);
     for e in edges {
@@ -285,14 +306,18 @@ fn rasterize_row_centers(edges: &[[f32; 4]], offset_x: f32) -> (Vec<u8>, Placeme
         y_max = y_max.max(e[1]).max(e[3]);
     }
     // Row k spans [k, k + 1] and samples at k + 0.5.
-    let first_row = (y_min - 0.5).ceil() as i32;
-    let last_row = (y_max - 0.5).floor() as i32;
+    let first_row = (y_min - 0.5).ceil() as i64;
+    let last_row = (y_max - 0.5).floor() as i64;
     if last_row < first_row {
-        return empty;
+        return Some(empty);
     }
-    let left = (x_min + offset_x).floor() as i32;
-    let width = ((x_max + offset_x).ceil() as i32 - left).max(0) as usize;
-    let height = (last_row - first_row + 1) as usize;
+    let left = (x_min + offset_x).floor() as i64;
+    let width = usize::try_from(((x_max + offset_x).ceil() as i64).checked_sub(left)?).ok()?;
+    let height = usize::try_from(last_row.checked_sub(first_row)?.checked_add(1)?).ok()?;
+    if width.checked_mul(height)? > MAX_ROW_CENTER_PIXELS {
+        return None;
+    }
+    let (left, top) = (i32::try_from(left).ok()?, i32::try_from(last_row.checked_add(1)?).ok()?);
     let mut out = alloc::vec![0u8; width * height];
     let mut coverage = alloc::vec![0f32; width];
     let mut crossings: Vec<(f32, i32)> = Vec::new();
@@ -322,7 +347,7 @@ fn rasterize_row_centers(edges: &[[f32; 4]], offset_x: f32) -> (Vec<u8>, Placeme
             *dst = (c.min(1.0) * 255.0).round() as u8;
         }
     }
-    (out, Placement { left, top: last_row + 1, width: width as u32, height: height as u32 })
+    Some((out, Placement { left, top, width: width as u32, height: height as u32 }))
 }
 
 fn add_span(coverage: &mut [f32], a: f32, b: f32) {
@@ -341,43 +366,134 @@ fn add_span(coverage: &mut [f32], a: f32, b: f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use skrifa::raw::FontRead;
 
     const GRIDFIT: GaspRangeBehavior = GaspRangeBehavior::GASP_GRIDFIT;
     const DOGRAY: GaspRangeBehavior = GaspRangeBehavior::GASP_DOGRAY;
     const SYM_GRIDFIT: GaspRangeBehavior = GaspRangeBehavior::GASP_SYMMETRIC_GRIDFIT;
     const SYM_SMOOTHING: GaspRangeBehavior = GaspRangeBehavior::GASP_SYMMETRIC_SMOOTHING;
 
+    fn rasterization_of(hinted: bool, vertical_smoothing: bool) -> Rasterization {
+        Rasterization { hinted, vertical_smoothing }
+    }
+
+    /// The flags of each case come from Windows fonts; DirectWrite's recommended mode for them
+    /// was read with `IDWriteFontFace3::GetRecommendedRenderingMode`.
     #[test]
     fn rasterization_follows_the_gasp_flags_like_directwrite() {
-        // Microsoft YaHei UI up to 21 ppem, and above.
-        assert_eq!(
-            rasterization_for(Some(GRIDFIT | DOGRAY | SYM_GRIDFIT), 15.0),
-            Rasterization::Hinted { vertical_smoothing: false }
-        );
-        assert_eq!(
-            rasterization_for(Some(GRIDFIT | DOGRAY | SYM_SMOOTHING), 22.5),
-            Rasterization::Unhinted
-        );
-        // Segoe UI above 19 ppem: fitted and smoothed.
-        assert_eq!(
-            rasterization_for(Some(GRIDFIT | DOGRAY | SYM_GRIDFIT | SYM_SMOOTHING), 20.0),
-            Rasterization::Hinted { vertical_smoothing: true }
-        );
-        // An unhinted font that asks for smoothing only.
-        assert_eq!(rasterization_for(Some(DOGRAY | SYM_SMOOTHING), 12.0), Rasterization::Unhinted);
-        // No gasp table.
-        assert_eq!(
-            rasterization_for(None, 20.0),
-            Rasterization::Hinted { vertical_smoothing: false }
-        );
-        assert_eq!(
-            rasterization_for(None, 20.5),
-            Rasterization::Hinted { vertical_smoothing: true }
-        );
+        let empty = GaspRangeBehavior::empty();
+        let cases = [
+            // Microsoft YaHei UI up to 21 ppem, and above.
+            (Some(GRIDFIT | DOGRAY | SYM_GRIDFIT), 15, (true, false)),
+            (Some(GRIDFIT | DOGRAY | SYM_SMOOTHING), 23, (false, true)),
+            // Segoe UI above 19 ppem.
+            (Some(GRIDFIT | DOGRAY | SYM_GRIDFIT | SYM_SMOOTHING), 20, (true, true)),
+            // Candara and Cascadia Code at small sizes.
+            (Some(DOGRAY | SYM_SMOOTHING), 9, (false, true)),
+            // Arial and Javanese Text from 9 to 17 ppem.
+            (Some(GRIDFIT | SYM_GRIDFIT), 12, (true, false)),
+            // Roboto up to 8 ppem: grayscale alone neither fits nor smooths vertically.
+            (Some(DOGRAY), 8, (false, false)),
+            (Some(empty), 8, (false, false)),
+            // MV Boli at every size: plain grid-fitting doesn't count.
+            (Some(GRIDFIT), 12, (false, false)),
+            (Some(GRIDFIT | DOGRAY), 30, (false, false)),
+            // No flags: fitted, smoothed vertically above 20 ppem.
+            (None, 20, (true, false)),
+            (None, 21, (true, true)),
+        ];
+        for (flags, ppem, (hinted, smoothed)) in cases {
+            assert_eq!(
+                rasterization_for(flags, ppem),
+                rasterization_of(hinted, smoothed),
+                "{flags:?} at {ppem} ppem"
+            );
+        }
+    }
+
+    #[test]
+    fn version_0_gasp_tables_count_as_none() {
+        // One range up to 65535 ppem with the grayscale flag.
+        let version_0 = [0, 0, 0, 1, 0xff, 0xff, 0, 2];
+        let gasp = Gasp::read(skrifa::raw::FontData::new(&version_0)).unwrap();
+        assert_eq!(gasp_flags(Some(gasp), 12), None);
+        let version_1 = [0, 1, 0, 1, 0xff, 0xff, 0, 2];
+        let gasp = Gasp::read(skrifa::raw::FontData::new(&version_1)).unwrap();
+        assert_eq!(gasp_flags(Some(gasp), 12), Some(DOGRAY));
+    }
+
+    /// Roboto's `gasp`: up to 8 ppem neither fitted nor smoothed vertically, fitted and
+    /// smoothed above.
+    const ROBOTO: &[u8] =
+        include_bytes!("../../../../../examples/carousel/ui/fonts/Roboto-Regular.ttf");
+
+    fn render_roboto(size: f32) -> (Vec<u8>, (i32, i32, u32, u32)) {
+        render_roboto_char('E', size)
+    }
+
+    fn render_roboto_char(c: char, size: f32) -> (Vec<u8>, (i32, i32, u32, u32)) {
+        let font = skrifa::FontRef::new(ROBOTO).unwrap();
+        let gid = font.charmap().map(c).unwrap().to_u32() as u16;
+        let (data, placement) = render_hinted(ROBOTO, 0, 1, size, &[], 0, gid, 0.0)
+            .expect("drawn here")
+            .expect("not drawn as designed");
+        (data, placed(placement))
+    }
+
+    #[test]
+    fn sizes_that_share_a_cache_entry_draw_the_same_whichever_comes_first() {
+        // 8.49 rounds to 8 ppem; 8.496 and 8.5 share 1/64 px 544, at 9 ppem.
+        let sizes = [8.49, 8.496, 8.5];
+        let cold: Vec<_> = sizes
+            .iter()
+            .map(|&size| {
+                INSTANCES.with(|instances| instances.borrow_mut().clear());
+                render_roboto(size)
+            })
+            .collect();
+        assert_ne!(cold[0], cold[2], "the sizes fall in different gasp ranges");
+        assert_eq!(cold[1], cold[2]);
+        for order in [[0, 1, 2], [2, 1, 0], [1, 0, 2]] {
+            INSTANCES.with(|instances| instances.borrow_mut().clear());
+            for i in order {
+                assert_eq!(render_roboto(sizes[i]), cold[i], "{} after {order:?}", sizes[i]);
+            }
+        }
+    }
+
+    #[test]
+    fn unhinted_sizes_without_vertical_smoothing_draw_stems_without_faded_ends() {
+        // Roboto's H at 8 ppem is drawn as designed but sampled once per row: the stems' top
+        // and bottom rows are as dark as their middle. Smoothed, they fade.
+        let ends_match_middle = |data: &[u8], width: u32, height: u32| {
+            let rows: Vec<&[u8]> = data.chunks(width as usize).collect();
+            let middle = rows[height as usize / 4];
+            rows[0] == middle && rows[rows.len() - 1] == middle
+        };
+        let (data, (_, _, width, height)) = render_roboto_char('H', 8.0);
+        assert!(ends_match_middle(&data, width, height));
+        let font = swash::FontRef::from_index(ROBOTO, 0).unwrap();
+        let mut context = swash::scale::ScaleContext::new();
+        let gid = font.charmap().map('H');
+        let image = swash::scale::Render::new(&[swash::scale::Source::Outline])
+            .format(Format::Alpha)
+            .render(&mut context.builder(font).size(8.0).build(), gid)
+            .unwrap();
+        assert!(!ends_match_middle(&image.data, image.placement.width, image.placement.height));
     }
 
     fn placed(p: Placement) -> (i32, i32, u32, u32) {
         (p.left, p.top, p.width, p.height)
+    }
+
+    #[test]
+    fn outlines_too_large_or_not_finite_are_left_to_the_plain_rasterizer() {
+        assert!(rasterize_row_centers(&rectangle(0.0, 0.0, f32::NAN, 1.0), 0.0).is_none());
+        assert!(rasterize_row_centers(&rectangle(0.0, 0.0, f32::INFINITY, 1.0), 0.0).is_none());
+        assert!(rasterize_row_centers(&rectangle(0.0, 0.0, 1.0, 1.0), f32::NAN).is_none());
+        assert!(rasterize_row_centers(&rectangle(0.0, 0.0, 4096.0, 4096.0), 0.0).is_none());
+        assert!(rasterize_row_centers(&rectangle(-3e38, -3e38, 3e38, 3e38), 0.0).is_none());
+        assert!(rasterize_row_centers(&rectangle(0.0, 0.0, 2048.0, 2048.0), 0.0).is_some());
     }
 
     fn rectangle(x0: f32, y0: f32, x1: f32, y1: f32) -> Vec<[f32; 4]> {
@@ -393,11 +509,13 @@ mod tests {
     #[test]
     fn a_fitted_horizontal_stroke_fills_whole_rows_with_exact_coverage_across() {
         // A stroke 1 pixel tall from y = 3 to 4, x from 0.25 to 2.5.
-        let (data, placement) = rasterize_row_centers(&rectangle(0.25, 3.0, 2.5, 4.0), 0.0);
+        let (data, placement) =
+            rasterize_row_centers(&rectangle(0.25, 3.0, 2.5, 4.0), 0.0).unwrap();
         assert_eq!(placed(placement), (0, 4, 3, 1));
         assert_eq!(data, [191, 255, 128]);
         // The subpixel offset moves it across, not down.
-        let (data, placement) = rasterize_row_centers(&rectangle(0.25, 3.0, 2.5, 4.0), 0.75);
+        let (data, placement) =
+            rasterize_row_centers(&rectangle(0.25, 3.0, 2.5, 4.0), 0.75).unwrap();
         assert_eq!(placed(placement), (1, 4, 3, 1));
         assert_eq!(data, [255, 255, 64]);
     }
@@ -405,7 +523,8 @@ mod tests {
     #[test]
     fn a_stroke_that_misses_every_row_center_leaves_no_row() {
         // 0.4 pixels tall, between two centers.
-        let (data, placement) = rasterize_row_centers(&rectangle(0.0, 3.55, 2.0, 3.95), 0.0);
+        let (data, placement) =
+            rasterize_row_centers(&rectangle(0.0, 3.55, 2.0, 3.95), 0.0).unwrap();
         assert_eq!(placement.height, 0);
         assert!(data.is_empty());
     }
@@ -414,14 +533,14 @@ mod tests {
     fn overlapping_contours_count_once_and_holes_stay_empty() {
         let mut edges = rectangle(0.0, 0.0, 4.0, 3.0);
         edges.extend(rectangle(1.0, 0.0, 3.0, 3.0)); // same winding: overlaps
-        let (data, _) = rasterize_row_centers(&edges, 0.0);
+        let (data, _) = rasterize_row_centers(&edges, 0.0).unwrap();
         assert!(data.iter().all(|&a| a == 255));
         let mut edges = rectangle(0.0, 0.0, 4.0, 3.0);
         // Reversed winding: a hole in the middle row's middle.
         let mut hole = rectangle(1.0, 1.0, 3.0, 2.0);
         hole.iter_mut().for_each(|e| *e = [e[2], e[3], e[0], e[1]]);
         edges.extend(hole);
-        let (data, placement) = rasterize_row_centers(&edges, 0.0);
+        let (data, placement) = rasterize_row_centers(&edges, 0.0).unwrap();
         assert_eq!(placement.height, 3);
         assert_eq!(&data[4..8], &[255, 0, 0, 255]);
     }
@@ -441,6 +560,11 @@ mod tests {
             ("nirmala", "Nirmala.ttc", 0),
             ("arlrdbd", "ARLRDBD.TTF", 0),
             ("segvar", "SegUIVar.ttf", 0),
+            ("roboto", "Roboto-Regular.ttf", 0),
+            ("mvboli", "mvboli.ttf", 0),
+            ("agency", "AGENCYR.TTF", 0),
+            ("javatext", "javatext.ttf", 0),
+            ("arial", "arial.ttf", 0),
         ];
         let reference = include_str!("directwrite_rows.txt");
         let mut scale_context = swash::scale::ScaleContext::new();
@@ -448,8 +572,9 @@ mod tests {
         for (blob_id, (name, file, index)) in fonts.into_iter().enumerate() {
             let Ok(data) = std::fs::read(std::format!("C:/Windows/Fonts/{file}")) else { continue };
             let face = skrifa::FontRef::from_index(&data, index).unwrap();
-            // [without vertical smoothing, with it]: (glyphs, glyphs inking the same rows)
-            let mut counts = [(0, 0); 2];
+            // [without vertical smoothing below 9 ppem, from 9 ppem, with vertical smoothing]:
+            // (glyphs, glyphs inking the same rows)
+            let mut counts = [(0, 0); 3];
             let mut first_miss = None;
             for line in reference.lines().filter(|l| l.split(' ').next() == Some(name)) {
                 let mut it = line.split(' ').skip(1);
@@ -482,35 +607,41 @@ mod tests {
                         inked[first..=last].iter().map(|&i| if i { '1' } else { '0' }).collect();
                     (placement.top - first as i32, pattern)
                 });
-                let smoothed = rasterization(&face, size)
-                    != Rasterization::Hinted { vertical_smoothing: false };
-                let count = &mut counts[smoothed as usize];
+                let smoothed = rasterization(&face, size).vertical_smoothing;
+                let count = &mut counts[if smoothed { 2 } else { (size.round() >= 9.0) as usize }];
                 count.0 += 1;
                 if ours.as_ref().is_some_and(|(t, p)| *t == top && p == rows) {
                     count.1 += 1;
-                } else if !smoothed && first_miss.is_none() {
+                } else if !smoothed && size.round() >= 9.0 && first_miss.is_none() {
                     first_miss = Some((size, gid, top, alloc::string::String::from(rows), ours));
                 }
             }
             std::println!(
-                "{name}: same rows {:?} without vertical smoothing, {:?} with",
+                "{name}: same rows {:?} without vertical smoothing below 9 ppem, {:?} from 9 ppem, {:?} with",
                 counts[0],
-                counts[1]
+                counts[1],
+                counts[2]
             );
-            // Where rows are fitted and sampled once, the rows must match. With vertical
-            // smoothing a faint edge row can fall on either side of the ink threshold, so
-            // those only have to mostly match.
-            let [(sharp, sharp_same), (smooth, smooth_same)] = counts;
+            // Where rows are sampled once, the rows must match. Below 9 ppem DirectWrite also
+            // keeps strokes that fall between two row centers (dropout control), which this
+            // doesn't. With vertical smoothing a faint edge row can fall on either side of the
+            // ink threshold.
+            let [(tiny, tiny_same), (sharp, sharp_same), (smooth, smooth_same)] = counts;
             assert!(
-                sharp_same * 100 >= sharp * 98,
+                tiny_same * 100 >= tiny * 80,
+                "{name}: {tiny_same} of {tiny} glyphs below 9 ppem"
+            );
+            assert!(
+                sharp_same * 100 >= sharp * 97,
                 "{name}: {sharp_same} of {sharp} glyphs ink the rows DirectWrite inks; first miss {first_miss:?}"
             );
             assert!(
                 smooth_same * 100 >= smooth * 70,
                 "{name}: {smooth_same} of {smooth} smoothed glyphs"
             );
-            checked += sharp + smooth;
+            checked += tiny + sharp + smooth;
         }
         std::println!("checked {checked} glyphs");
+        assert!(checked > 0, "none of the fonts is installed");
     }
 }
