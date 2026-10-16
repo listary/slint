@@ -3672,7 +3672,9 @@ impl<T: ProcessScene> sharedparley::GlyphRenderer for SceneBuilder<'_, T> {
             swash_offset,
             font_size.cast(),
             normalized_coords,
-        );
+        )
+        // LISTARY PATCH (glyph-hinting): draw at the exact size, not the size rounded down.
+        .with_exact_pixel_size(font_size.get());
 
         let global_offset: euclid::Vector2D<f32, PhysicalPx> =
             self.current_state.offset.to_vector().cast() * self.scale_factor;

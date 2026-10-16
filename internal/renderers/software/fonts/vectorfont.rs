@@ -15,6 +15,8 @@ use i_slint_core::textlayout::{Glyph, TextShaper};
 
 use super::RenderableVectorGlyph;
 
+mod hinting;
+
 // A length in font design space.
 struct FontUnit;
 type FontLength = euclid::Length<i32, FontUnit>;
@@ -37,8 +39,9 @@ struct GlyphCacheKey {
     font_blob_id: u64,
     /// Font index within the blob.
     font_index: u32,
-    /// Rendered pixel size.
-    pixel_size: PhysicalLength,
+    // LISTARY PATCH (glyph-hinting): the exact size, so fractional sizes don't share glyphs.
+    /// Rendered pixel size in 1/64 pixels.
+    size_64: u32,
     /// Glyph id.
     glyph_id: core::num::NonZeroU16,
     /// Hash of the normalized variation coordinates.
@@ -80,6 +83,8 @@ pub struct VectorFont {
     descender: PhysicalLength,
     height: PhysicalLength,
     pixel_size: PhysicalLength,
+    /// The size glyphs are drawn at; `pixel_size` rounds it down for the legacy shaper.
+    exact_pixel_size: f32,
     x_height: PhysicalLength,
     cap_height: PhysicalLength,
     /// Normalized variation coordinates (F2Dot14, fvar axis order) for variable font rendering.
@@ -165,11 +170,20 @@ impl VectorFont {
             descender: (descender.cast() * scale).cast(),
             height: (height.cast() * scale).cast(),
             pixel_size,
+            exact_pixel_size: pixel_size.get() as f32,
             x_height: (x_height.cast() * scale).cast(),
             cap_height: (cap_height.cast() * scale).cast(),
             normalized_coords: normalized_coords.to_vec(),
             coords_hash,
         }
+    }
+
+    // LISTARY PATCH (glyph-hinting)
+    /// Draws glyphs at `size` pixels, rounded to 1/64 pixels, instead of the whole-pixel size
+    /// the font was created with.
+    pub fn with_exact_pixel_size(mut self, size: f32) -> Self {
+        self.exact_pixel_size = hinting::size_64(size) as f32 / 64.0;
+        self
     }
 
     pub fn render_vector_glyph(
@@ -184,7 +198,7 @@ impl VectorFont {
             let cache_key = GlyphCacheKey {
                 font_blob_id: self.font_blob.id(),
                 font_index: self.font_index,
-                pixel_size: self.pixel_size,
+                size_64: hinting::size_64(self.exact_pixel_size),
                 glyph_id,
                 coords_hash: self.coords_hash,
                 subpixel_bin,
@@ -197,20 +211,36 @@ impl VectorFont {
             let subpixel_offset_x = subpixel_bin as f32 / SUBPIXEL_BIN_COUNT as f32;
 
             let glyph = {
-                let font_ref = self.swash_font_ref();
-                let mut ctx = slint_context.swash_scale_context().borrow_mut();
-                let mut scaler = ctx
-                    .builder(font_ref)
-                    .size(self.pixel_size.get() as f32)
-                    .normalized_coords(&self.normalized_coords)
-                    .build();
-                let image = swash::scale::Render::new(&[swash::scale::Source::Outline])
-                    .format(swash::zeno::Format::Alpha)
-                    .offset(swash::zeno::Vector::new(subpixel_offset_x, 0.0))
-                    .render(&mut scaler, glyph_id.get())?;
-
-                let placement = image.placement;
-                let alpha_map: Rc<[u8]> = image.data.into();
+                // LISTARY PATCH (glyph-hinting): hinted where the font asks for it.
+                let hinted = hinting::render_hinted(
+                    self.font_blob.data(),
+                    self.font_index,
+                    self.font_blob.id(),
+                    self.exact_pixel_size,
+                    &self.normalized_coords,
+                    self.coords_hash,
+                    glyph_id.get(),
+                    subpixel_offset_x,
+                )
+                .flatten();
+                let (data, placement) = match hinted {
+                    Some(hinted) => hinted,
+                    None => {
+                        let font_ref = self.swash_font_ref();
+                        let mut ctx = slint_context.swash_scale_context().borrow_mut();
+                        let mut scaler = ctx
+                            .builder(font_ref)
+                            .size(self.exact_pixel_size)
+                            .normalized_coords(&self.normalized_coords)
+                            .build();
+                        let image = swash::scale::Render::new(&[swash::scale::Source::Outline])
+                            .format(swash::zeno::Format::Alpha)
+                            .offset(swash::zeno::Vector::new(subpixel_offset_x, 0.0))
+                            .render(&mut scaler, glyph_id.get())?;
+                        (image.data, image.placement)
+                    }
+                };
+                let alpha_map: Rc<[u8]> = data.into();
 
                 Some(RenderableVectorGlyph {
                     x: Fixed::from_integer(placement.left),
