@@ -313,6 +313,9 @@ fn rasterize_row_centers(edges: &[[f32; 4]], offset_x: f32) -> Option<(Vec<u8>, 
     }
     let left = (x_min + offset_x).floor() as i64;
     let width = usize::try_from(((x_max + offset_x).ceil() as i64).checked_sub(left)?).ok()?;
+    if width == 0 {
+        return Some(empty);
+    }
     let height = usize::try_from(last_row.checked_sub(first_row)?.checked_add(1)?).ok()?;
     if width.checked_mul(height)? > MAX_ROW_CENTER_PIXELS {
         return None;
@@ -494,6 +497,11 @@ mod tests {
         assert!(rasterize_row_centers(&rectangle(0.0, 0.0, 4096.0, 4096.0), 0.0).is_none());
         assert!(rasterize_row_centers(&rectangle(-3e38, -3e38, 3e38, 3e38), 0.0).is_none());
         assert!(rasterize_row_centers(&rectangle(0.0, 0.0, 2048.0, 2048.0), 0.0).is_some());
+        // No width: nothing to draw, however tall, and no row is scanned.
+        let (data, placement) =
+            rasterize_row_centers(&rectangle(0.0, -2e9, 0.0, 0.0), 0.0).unwrap();
+        assert!(data.is_empty() && placement.height == 0);
+        assert!(rasterize_row_centers(&rectangle(0.0, -2e9, 0.0, 0.0), 0.5).is_none());
     }
 
     fn rectangle(x0: f32, y0: f32, x1: f32, y1: f32) -> Vec<[f32; 4]> {
