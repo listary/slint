@@ -109,6 +109,14 @@ macro_rules! for_each_builtin_structs {
                 /// This field is set to true for key press events that are repeated,
                 /// i.e. the key is held down. It's always false for key release events.
                 repeat: bool,
+                // LISTARY PATCH (key-code)
+                /// The Windows virtual key code of the key under the active keyboard layout, such as 0x56 for V.
+                /// It identifies the key independently of `text`, which depends on Caps Lock and on the layout,
+                /// so that Ctrl+V can be matched while a Russian layout produces "м".
+                /// The backend derives it from the scan code and the layout,
+                /// so it can differ from the `wParam` of `WM_KEYDOWN`, for example for numpad keys.
+                /// It's 0 when no code is available, which is always the case on other platforms.
+                windows_virtual_key: i32,
             }
 
             /// This structure is passed to the callbacks of the `DropArea` element
