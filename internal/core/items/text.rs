@@ -1029,7 +1029,58 @@ impl Item for TextInput {
                     return KeyEventResult::EventAccepted;
                 }
 
-                let delete_direction = match event.text_shortcut() {
+                // LISTARY PATCH (key-code): standard commands come before the special key filter,
+                // so that Ctrl+Insert and Shift+Insert reach them.
+                if let Some(shortcut) = event.shortcut() {
+                    match shortcut {
+                        StandardShortcut::SelectAll => {
+                            self.select_all(window_adapter, self_rc);
+                            return KeyEventResult::EventAccepted;
+                        }
+                        StandardShortcut::Copy => {
+                            self.copy(window_adapter, self_rc);
+                            return KeyEventResult::EventAccepted;
+                        }
+                        StandardShortcut::Paste if !self.read_only() => {
+                            self.paste(window_adapter, self_rc);
+                            return KeyEventResult::EventAccepted;
+                        }
+                        StandardShortcut::Cut if !self.read_only() => {
+                            self.cut(window_adapter, self_rc);
+                            return KeyEventResult::EventAccepted;
+                        }
+                        StandardShortcut::Paste | StandardShortcut::Cut => {
+                            return KeyEventResult::EventIgnored;
+                        }
+                        StandardShortcut::Undo if !self.read_only() => {
+                            self.undo(window_adapter, self_rc);
+                            return KeyEventResult::EventAccepted;
+                        }
+                        StandardShortcut::Redo if !self.read_only() => {
+                            self.redo(window_adapter, self_rc);
+                            return KeyEventResult::EventAccepted;
+                        }
+                        _ => (),
+                    }
+                }
+
+                let text_shortcut = event.text_shortcut();
+                // LISTARY PATCH (key-code): Shift+Delete cuts the selection, as in native Windows and Qt text fields.
+                if matches!(text_shortcut, Some(TextShortcut::DeleteForward))
+                    && event.key_event.modifiers.shift
+                    && !crate::is_apple_platform()
+                {
+                    let (anchor, cursor) = self.selection_anchor_and_cursor();
+                    if anchor != cursor {
+                        if self.read_only() {
+                            return KeyEventResult::EventIgnored;
+                        }
+                        self.cut(window_adapter, self_rc);
+                        return KeyEventResult::EventAccepted;
+                    }
+                }
+
+                let delete_direction = match text_shortcut {
                     Some(TextShortcut::Move(direction)) => {
                         TextInput::move_cursor(
                             self,
@@ -1082,39 +1133,6 @@ impl Item for TextInput {
                     })
                 {
                     return KeyEventResult::EventIgnored;
-                }
-
-                if let Some(shortcut) = event.shortcut() {
-                    match shortcut {
-                        StandardShortcut::SelectAll => {
-                            self.select_all(window_adapter, self_rc);
-                            return KeyEventResult::EventAccepted;
-                        }
-                        StandardShortcut::Copy => {
-                            self.copy(window_adapter, self_rc);
-                            return KeyEventResult::EventAccepted;
-                        }
-                        StandardShortcut::Paste if !self.read_only() => {
-                            self.paste(window_adapter, self_rc);
-                            return KeyEventResult::EventAccepted;
-                        }
-                        StandardShortcut::Cut if !self.read_only() => {
-                            self.cut(window_adapter, self_rc);
-                            return KeyEventResult::EventAccepted;
-                        }
-                        StandardShortcut::Paste | StandardShortcut::Cut => {
-                            return KeyEventResult::EventIgnored;
-                        }
-                        StandardShortcut::Undo if !self.read_only() => {
-                            self.undo(window_adapter, self_rc);
-                            return KeyEventResult::EventAccepted;
-                        }
-                        StandardShortcut::Redo if !self.read_only() => {
-                            self.redo(window_adapter, self_rc);
-                            return KeyEventResult::EventAccepted;
-                        }
-                        _ => (),
-                    }
                 }
 
                 if self.read_only() || event.key_event.modifiers.control {

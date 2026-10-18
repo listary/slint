@@ -711,3 +711,37 @@ handler 可跑了。两处注释补了这个理由(`LISTARY PATCH (accesskit-ree
 (带 `WS_EX_APPWINDOW`、没有 `WS_EX_TOOLWINDOW`);修后是 `0x80090`。
 
 **升级**:R-89 原子呈现是本分叉自己的功能,随 `ulw.rs` 一起带过去。
+
+## 十一、按键事件带虚拟键码（`key-code`）
+
+**现象**:文本框的 Ctrl+A/C/V/X/Z/Y 在大写锁定开着、或者俄语这类非拉丁布局下不起作用;
+Ctrl+Insert、Shift+Insert 没有反应;有选区时 Shift+Delete 只删不剪。
+
+**成因**:
+- Slint 的按键事件只有 `text`,`TextInput` 按 `text == "v"` 这样比字符认标准编辑命令。
+  大写锁定时 winit 给的是 "V",俄语布局给的是「м」,都对不上。
+- Insert 键的 `text` 是私用区字符,在认标准命令之前就被「不插入特殊字符」那道过滤挡掉了。
+- Shift+Delete 被当成普通的向前删除。
+
+**修法**(`LISTARY PATCH (key-code)`):
+- `KeyEvent` 加公开字段 `windows-virtual-key`(Rust 里是 `windows_virtual_key`,`int`):
+  当前布局下的 Windows 虚拟键码,0 表示没有。`text` 不变。
+  文档写明它是推导值:winit 不公开消息里的虚拟键码,所以由扫描码加窗口线程的键盘布局换算
+  (`MapVirtualKeyExW(MAPVK_VSC_TO_VK_EX)`),小键盘等少数键可能和 `WM_KEYDOWN` 的 `wParam` 不同。
+  其他平台、其他后端和公开的 `WindowEvent::KeyPressed` 都是 0。
+- `InternalKeyEvent::shortcut()`:Ctrl+字母先看虚拟键码(VK_A…VK_Z),没有键码时才看 `text`,
+  且不分大小写。新增 Ctrl+Insert 复制、Shift+Insert 粘贴(苹果平台不加)。
+- `TextInput::key_event`:标准命令挪到 `key-pressed` 回调之后、光标移动和删除之前,Insert 不再被过滤挡掉。
+  有选区时 Shift+Delete 剪切;没有选区时照旧向前删一个字。只读框照旧只允许复制。
+- AltGr 判断(`modifiers_for`)不动,仍按 `text` 和 `text_without_modifiers` 判断;
+  判成 AltGr 时 Ctrl 被清掉,所以 AltGr+A 打出「ą」而不是全选。
+
+**测试**:`api/rs/slint/tests/text_input_key_code.rs`(Windows):
+`cargo test -p slint --no-default-features --features std,renderer-software,compat-1-2 --test text_input_key_code`。
+测试经 `WindowEvent::internal` 送入带键码的事件,走完整的 `TextInput` 分发:
+大写锁定、俄语布局的六个编辑命令、两个 Insert 组合、有无选区的 Shift+Delete、只读框、
+Ctrl+Shift+V、AltGr,以及键码在按下、重复和松开时都能在 `key-pressed`/`key-released` 里读到。
+修前 12 条里有 7 条失败。
+
+**升级**:上游没有这个字段(物理键的讨论见 slint-ui/slint#4221、#12570)。上游给出等价的键身份以后,
+把 `.slint` 和 Rust 里对 `windows-virtual-key` 的引用迁过去,再去掉这处分叉;在那之前随版本挑过去。
