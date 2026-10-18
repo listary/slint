@@ -115,7 +115,8 @@ macro_rules! for_each_builtin_structs {
                 /// so that Ctrl+V can be matched while a Russian layout produces "м".
                 /// The backend derives it from the scan code and the layout,
                 /// so it can differ from the `wParam` of `WM_KEYDOWN`, for example for numpad keys.
-                /// It's 0 when no code is available, which is always the case on other platforms.
+                /// Only the winit backend on Windows sets it. It's 0 with other backends, on other platforms,
+                /// for events dispatched through `WindowEvent`, and when no code is available.
                 windows_virtual_key: i32,
             }
 

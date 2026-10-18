@@ -1142,7 +1142,11 @@ impl InternalKeyEvent {
                 _ => (),
             }
         }
-        if modifiers.control && !modifiers.shift {
+        // A real Ctrl+Alt (not AltGr, see `modifiers_for`) isn't a Ctrl+letter command.
+        if !modifiers.control || modifiers.alt || modifiers.meta {
+            return None;
+        }
+        if !modifiers.shift {
             match self.command_letter()? {
                 #[cfg(not(target_arch = "wasm32"))]
                 'c' => Some(StandardShortcut::Copy),
@@ -1160,14 +1164,12 @@ impl InternalKeyEvent {
                 'r' => Some(StandardShortcut::Refresh),
                 _ => None,
             }
-        } else if modifiers.control && modifiers.shift {
+        } else {
             match self.command_letter()? {
                 #[cfg(not(target_os = "windows"))]
                 'z' => Some(StandardShortcut::Redo),
                 _ => None,
             }
-        } else {
-            None
         }
     }
 

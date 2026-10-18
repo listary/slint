@@ -92,11 +92,13 @@ fn key_event(
     event_type: KeyEventType,
     repeat: bool,
 ) -> InternalKeyEvent {
+    let text = text.into();
     let mut key_event = KeyEvent::default();
-    key_event.text = text.into();
+    key_event.text = text.clone();
     key_event.windows_virtual_key = code;
     key_event.repeat = repeat;
-    InternalKeyEvent { key_event, event_type, ..Default::default() }
+    // The winit backend always sets this; it differs from `text` only for AltGr input.
+    InternalKeyEvent { key_event, event_type, text_without_modifiers: text, ..Default::default() }
 }
 
 /// Presses and releases one key, as the winit backend reports it on Windows.
@@ -226,6 +228,41 @@ fn altgr_letter_is_text_not_a_command() {
     });
     assert_eq!(instance.get_text(), "ą");
     assert_eq!(instance.get_anchor(), instance.get_cursor());
+}
+
+#[test]
+fn real_ctrl_alt_letter_is_not_a_command() {
+    // The text doesn't change under Ctrl+Alt, so it isn't AltGr and both modifiers stay set.
+    let instance = setup("");
+    with_modifiers(&instance, &[Key::Control, Key::Alt], || {
+        let window = instance.window();
+        for text in ["м", "v"] {
+            for event_type in [KeyEventType::KeyPressed, KeyEventType::KeyReleased] {
+                let mut event = key_event(text, VK_V, event_type, false);
+                event.text_without_modifiers = text.into();
+                window.dispatch_event(WindowEvent::internal(event));
+            }
+        }
+    });
+    assert_eq!(instance.get_text(), "");
+}
+
+#[test]
+fn ctrl_meta_letter_is_not_a_command() {
+    let instance = setup("");
+    with_modifiers(&instance, &[Key::Control, Key::Meta], || tap(&instance, "м", VK_V));
+    assert_eq!(instance.get_text(), "");
+}
+
+#[test]
+fn shift_delete_with_other_modifiers_does_not_cut() {
+    let instance = setup("abc");
+    for modifiers in [[Key::Alt, Key::Shift].as_slice(), &[Key::Control, Key::Alt, Key::Shift]] {
+        instance.set_text("abc".into());
+        instance.invoke_select(1, 3);
+        with_modifiers(&instance, modifiers, || tap(&instance, Key::Delete, VK_DELETE));
+        assert_eq!(clipboard(&instance), "clip", "{modifiers:?}");
+    }
 }
 
 #[test]

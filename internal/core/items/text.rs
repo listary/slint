@@ -1068,6 +1068,9 @@ impl Item for TextInput {
                 // LISTARY PATCH (key-code): Shift+Delete cuts the selection, as in native Windows and Qt text fields.
                 if matches!(text_shortcut, Some(TextShortcut::DeleteForward))
                     && event.key_event.modifiers.shift
+                    && !event.key_event.modifiers.control
+                    && !event.key_event.modifiers.alt
+                    && !event.key_event.modifiers.meta
                     && !crate::is_apple_platform()
                 {
                     let (anchor, cursor) = self.selection_anchor_and_cursor();
