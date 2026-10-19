@@ -1128,33 +1128,66 @@ impl InternalKeyEvent {
     /// If a shortcut was pressed, this function returns `Some(StandardShortcut)`.
     /// Otherwise it returns None.
     pub fn shortcut(&self) -> Option<StandardShortcut> {
-        if self.key_event.modifiers.control && !self.key_event.modifiers.shift {
-            match self.key_event.text.as_str() {
-                #[cfg(not(target_arch = "wasm32"))]
-                "c" => Some(StandardShortcut::Copy),
-                #[cfg(not(target_arch = "wasm32"))]
-                "x" => Some(StandardShortcut::Cut),
-                #[cfg(not(target_arch = "wasm32"))]
-                "v" => Some(StandardShortcut::Paste),
-                "a" => Some(StandardShortcut::SelectAll),
-                "f" => Some(StandardShortcut::Find),
-                "s" => Some(StandardShortcut::Save),
-                "p" => Some(StandardShortcut::Print),
-                "z" => Some(StandardShortcut::Undo),
-                #[cfg(target_os = "windows")]
-                "y" => Some(StandardShortcut::Redo),
-                "r" => Some(StandardShortcut::Refresh),
-                _ => None,
+        let modifiers = &self.key_event.modifiers;
+        // LISTARY PATCH (key-code): Ctrl+Insert and Shift+Insert, and letters from `command_letter`.
+        #[cfg(not(target_arch = "wasm32"))]
+        if !crate::is_apple_platform()
+            && !modifiers.alt
+            && !modifiers.meta
+            && self.key_event.text.chars().eq([key_codes::Insert])
+        {
+            match (modifiers.control, modifiers.shift) {
+                (true, false) => return Some(StandardShortcut::Copy),
+                (false, true) => return Some(StandardShortcut::Paste),
+                _ => (),
             }
-        } else if self.key_event.modifiers.control && self.key_event.modifiers.shift {
-            match self.key_event.text.as_str() {
-                #[cfg(not(target_os = "windows"))]
-                "z" | "Z" => Some(StandardShortcut::Redo),
+        }
+        // A real Ctrl+Alt (not AltGr, see `modifiers_for`) isn't a Ctrl+letter command.
+        if !modifiers.control || modifiers.alt || modifiers.meta {
+            return None;
+        }
+        if !modifiers.shift {
+            match self.command_letter()? {
+                #[cfg(not(target_arch = "wasm32"))]
+                'c' => Some(StandardShortcut::Copy),
+                #[cfg(not(target_arch = "wasm32"))]
+                'x' => Some(StandardShortcut::Cut),
+                #[cfg(not(target_arch = "wasm32"))]
+                'v' => Some(StandardShortcut::Paste),
+                'a' => Some(StandardShortcut::SelectAll),
+                'f' => Some(StandardShortcut::Find),
+                's' => Some(StandardShortcut::Save),
+                'p' => Some(StandardShortcut::Print),
+                'z' => Some(StandardShortcut::Undo),
+                #[cfg(target_os = "windows")]
+                'y' => Some(StandardShortcut::Redo),
+                'r' => Some(StandardShortcut::Refresh),
                 _ => None,
             }
         } else {
-            None
+            match self.command_letter()? {
+                #[cfg(not(target_os = "windows"))]
+                'z' => Some(StandardShortcut::Redo),
+                _ => None,
+            }
         }
+    }
+
+    /// LISTARY PATCH (key-code): the lowercase letter that names the key in a Ctrl+letter command.
+    /// Taken from the Windows virtual key code when there is one,
+    /// so that Caps Lock and non-Latin layouts don't change it.
+    fn command_letter(&self) -> Option<char> {
+        let code = self.key_event.windows_virtual_key;
+        if code != 0 {
+            // VK_A to VK_Z are the ASCII codes of 'A' to 'Z'.
+            return u8::try_from(code)
+                .ok()
+                .filter(u8::is_ascii_uppercase)
+                .map(|c| char::from(c.to_ascii_lowercase()));
+        }
+        let mut chars = self.key_event.text.chars();
+        let letter = chars.next()?;
+        chars.next().is_none().then(|| letter.to_ascii_lowercase())
     }
 
     /// If a shortcut concerning text editing was pressed, this function

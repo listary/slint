@@ -23,6 +23,7 @@ Slint's <Link type="KeyBinding"/> elements and the built-in <Link type="keys" />
 - **`text`** (_string_):  The unicode representation of the key pressed.
 - **`modifiers`** (_KeyboardModifiers_):  The keyboard modifiers active at the time of the key press event.
 - **`repeat`** (_bool_):  This field is set to true for key press events that are repeated, i.e. the key is held down. It's always false for key release events.
+- **`windows-virtual-key`** (_int_):  The Windows virtual key code of the key under the active keyboard layout, such as 0x56 for V. Use it to match a key regardless of Caps Lock and of the layout, which both change `text`. The backend derives it from the scan code, so it can differ from the code in `WM_KEYDOWN`, for example for numpad keys. Only the winit backend on Windows sets it. It's 0 with other backends, on other platforms, and when no code is available.
 
 ## Key Bindings
 

@@ -1463,6 +1463,24 @@ impl WinitWindowAdapter {
                 let mut key_event = KeyEvent::default();
                 key_event.text = text;
                 key_event.repeat = event.repeat;
+                #[cfg(target_os = "windows")]
+                {
+                    use windows::Win32::UI::Input::KeyboardAndMouse::{
+                        GetKeyboardLayout, MAPVK_VSC_TO_VK_EX, MapVirtualKeyExW,
+                    };
+                    use winit::platform::scancode::PhysicalKeyExtScancode;
+                    // LISTARY PATCH (key-code): winit doesn't expose the virtual key of the message, so map the scan code
+                    // back through the layout of the thread that owns the window.
+                    if let Some(scancode) = event.physical_key.to_scancode() {
+                        key_event.windows_virtual_key = unsafe {
+                            MapVirtualKeyExW(
+                                scancode,
+                                MAPVK_VSC_TO_VK_EX,
+                                Some(GetKeyboardLayout(0)),
+                            )
+                        } as i32;
+                    }
+                }
 
                 let event = InternalKeyEvent {
                     key_event,
