@@ -22,14 +22,16 @@ slint::slint! {
         background: white;
         in property <length> rx;
         in property <length> rw;
+        in property <length> ry: 4px;
+        in property <length> rh: 32px;
         in property <length> radius;
         in property <length> border;
         in property <bool> gradient;
         Rectangle {
             x: root.rx;
-            y: 4px;
+            y: root.ry;
             width: root.rw;
-            height: 32px;
+            height: root.rh;
             background: root.gradient ? @linear-gradient(180deg, #f00, #00f) : #f00;
             border-width: root.border;
             border-color: #00f;
@@ -170,12 +172,15 @@ fn render_by_line(window: &MinimalSoftwareWindow, scale: f32) -> Frame {
 struct Rect {
     x: f32,
     width: f32,
+    y: f32,
+    height: f32,
     radius: f32,
     border: f32,
     gradient: bool,
 }
 
-const PLAIN: Rect = Rect { x: 0., width: 0., radius: 0., border: 0., gradient: false };
+const PLAIN: Rect =
+    Rect { x: 0., width: 0., y: 4., height: 32., radius: 0., border: 0., gradient: false };
 
 fn shape_frames(r: Rect, scale: f32, rotation: RenderingRotation) -> (Frame, Frame) {
     let (w, h) = physical_size(scale, RenderingRotation::NoRotation);
@@ -183,6 +188,8 @@ fn shape_frames(r: Rect, scale: f32, rotation: RenderingRotation) -> (Frame, Fra
     let app = Shape::new().unwrap();
     app.set_rx(r.x);
     app.set_rw(r.width);
+    app.set_ry(r.y);
+    app.set_rh(r.height);
     app.set_radius(r.radius);
     app.set_border(r.border);
     app.set_gradient(r.gradient);
@@ -280,6 +287,36 @@ fn rectangles_at_the_edge_of_the_renderer_range() {
                 1.,
                 RenderingRotation::NoRotation,
             );
+        }
+    }
+}
+
+/// The corners of a rounded rectangle with a wide border lie far outside the window, so in the
+/// window it draws like the same rectangle without a radius: border where the border reaches
+/// in, fill elsewhere.
+#[test]
+fn rounded_rectangles_with_a_wide_border_render_like_square_ones() {
+    let shapes = [
+        // The border ends some 1000 pixels before the window on every side.
+        Rect { x: -10000., width: 20000., y: -10000., height: 20000., border: 9000., ..PLAIN },
+        // The border reaches into the window on the left and at the bottom.
+        Rect { x: -10000., width: 20400., y: -10080., height: 20160., border: 10050., ..PLAIN },
+    ];
+    for far in shapes {
+        for scale in [1., 2.] {
+            assert_renders_like(
+                Rect { radius: 17., ..far },
+                far,
+                scale,
+                RenderingRotation::NoRotation,
+            );
+        }
+        for rotation in [
+            RenderingRotation::Rotate90,
+            RenderingRotation::Rotate180,
+            RenderingRotation::Rotate270,
+        ] {
+            assert_renders_like(Rect { radius: 17., ..far }, far, 1., rotation);
         }
     }
 }
