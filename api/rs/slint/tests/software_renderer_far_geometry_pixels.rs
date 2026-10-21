@@ -67,6 +67,19 @@ slint::slint! {
         }
     }
 
+    // A rounded rectangle filling a window that may be as large as the renderer's range.
+    export component Filled inherits Window {
+        in property <length> ww;
+        in property <length> wh;
+        width: root.ww;
+        height: root.wh;
+        background: white;
+        Rectangle {
+            background: #f00;
+            border-radius: 6px;
+        }
+    }
+
     export component FarPath inherits Window {
         width: 200px;
         height: 40px;
@@ -317,6 +330,46 @@ fn rounded_rectangles_with_a_wide_border_render_like_square_ones() {
             RenderingRotation::Rotate270,
         ] {
             assert_renders_like(Rect { radius: 17., ..far }, far, 1., rotation);
+        }
+    }
+}
+
+/// A rounded rectangle as wide or as tall as the renderer's range draws its straight edges.
+#[test]
+fn rounded_rectangles_spanning_the_renderer_range() {
+    let red = Rgb8Pixel::new(255, 0, 0);
+    for extent in [32766, 32767] {
+        for (width, height) in [(extent, 40), (200, extent)] {
+            let what = format!("{width}x{height}");
+            let window = common::setup(width as u32, height as u32);
+            let app = Filled::new().unwrap();
+            app.set_ww(width as f32);
+            app.set_wh(height as f32);
+            show(app.window(), 1.);
+            let mut frame = Frame { width, pixels: vec![Rgb8Pixel::new(0, 0, 0); width * height] };
+            window.request_redraw();
+            window.draw_if_needed(|renderer| {
+                renderer.set_repaint_buffer_type(RepaintBufferType::NewBuffer);
+                renderer.render(frame.pixels.as_mut_slice(), width);
+            });
+            let mut lines = Frame { width, pixels: vec![Rgb8Pixel::new(0, 0, 0); width * height] };
+            window.request_redraw();
+            window.draw_if_needed(|renderer| {
+                renderer.set_repaint_buffer_type(RepaintBufferType::NewBuffer);
+                renderer.render_by_line(Lines(&mut lines));
+            });
+            app.hide().unwrap();
+            assert_same(&frame, &lines, &what);
+            // The middle of each edge and the center are inside the rectangle.
+            for (x, y) in [
+                (width / 2, 0),
+                (width / 2, height - 1),
+                (0, height / 2),
+                (width - 1, height / 2),
+                (width / 2, height / 2),
+            ] {
+                assert_eq!(frame.pixels[y * width + x], red, "{what} at ({x}, {y})");
+            }
         }
     }
 }
