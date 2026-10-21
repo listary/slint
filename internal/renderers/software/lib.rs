@@ -1869,7 +1869,7 @@ fn process_rectangle_impl(
         // LISTARY PATCH (far-geometry): `draw_rounded_rectangle_line` compares a clip, less one
         // for the bottom clip, only with the radii and the border width, so a clip beyond `reach`
         // draws the same. It adds a clip to the span in 16 bits, which the second cap keeps in
-        // range. That cap never binds for a rectangle that fits 16 bits.
+        // range, but not below 0. That cap never binds for a rectangle that fits 16 bits.
         let reach = radius
             .top_left
             .max(radius.top_right)
@@ -1877,8 +1877,8 @@ fn process_rectangle_impl(
             .max(radius.bottom_left)
             .max(border.get()) as f32
             + 1.;
-        let max_x = reach.min(i16::MAX as f32 - clipped.width().ceil() - 1.);
-        let max_y = reach.min(i16::MAX as f32 - clipped.height().ceil() - 1.);
+        let max_x = reach.min(i16::MAX as f32 - clipped.width().ceil() - 1.).max(0.);
+        let max_y = reach.min(i16::MAX as f32 - clipped.height().ceil() - 1.).max(0.);
 
         processor.process_rounded_rectangle(
             clipped.round().cast(),
