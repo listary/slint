@@ -95,12 +95,17 @@ impl core::fmt::Debug for Frame {
 
 /// Compares two frames pixel by pixel, naming the first difference.
 fn assert_same(far: &Frame, near: &Frame, what: &str) {
+    assert_close(far, near, 0, what);
+}
+
+/// Like [`assert_same`], but lets each channel differ by up to `tolerance`.
+fn assert_close(far: &Frame, near: &Frame, tolerance: u8, what: &str) {
     assert_eq!(far.width, near.width, "{what}: stride");
     for (i, (a, b)) in far.pixels.iter().zip(&near.pixels).enumerate() {
-        assert_eq!(
-            a,
-            b,
-            "{what}: first difference at ({}, {})",
+        let close = |x: u8, y: u8| x.abs_diff(y) <= tolerance;
+        assert!(
+            close(a.r, b.r) && close(a.g, b.g) && close(a.b, b.b),
+            "{what}: first difference at ({}, {}): {a:?} and {b:?}",
             i % far.width,
             i / far.width
         );
@@ -197,8 +202,14 @@ fn assert_renders_like(far: Rect, near: Rect, scale: f32, rotation: RenderingRot
     let what = format!("{far:?} like {near:?} at {scale}x, {rotation:?}");
     let (far_frame, far_lines) = shape_frames(far, scale, rotation);
     let (near_frame, near_lines) = shape_frames(near, scale, rotation);
-    assert_same(&far_frame, &near_frame, &what);
-    assert_same(&far_lines, &near_lines, &format!("{what}, by line"));
+    // Turned a quarter, a vertical gradient's angle goes through `tan` of 90° or 270°. That is
+    // large but finite in f32, so the gradient slants a little, by an amount that grows with the
+    // shape's length, and the twins' colors differ by one.
+    let quarter_turn =
+        matches!(rotation, RenderingRotation::Rotate90 | RenderingRotation::Rotate270);
+    let tolerance = if far.gradient && quarter_turn { 1 } else { 0 };
+    assert_close(&far_frame, &near_frame, tolerance, &what);
+    assert_close(&far_lines, &near_lines, tolerance, &format!("{what}, by line"));
     // The near shape must show up, or the comparison proves nothing.
     assert!(near_frame.pixels.iter().any(|p| *p != Rgb8Pixel::new(255, 255, 255)), "{what}");
 }
@@ -278,13 +289,11 @@ fn rectangles_at_the_edge_of_the_renderer_range() {
 
 #[test]
 fn rectangles_without_a_finite_geometry_render_nothing() {
-    for (x, width) in [(f32::NAN, 100.), (0., f32::NAN), (0., f32::INFINITY), (f32::NEG_INFINITY, 100.)]
+    for (x, width) in
+        [(f32::NAN, 100.), (0., f32::NAN), (0., f32::INFINITY), (f32::NEG_INFINITY, 100.)]
     {
-        let (frame, lines) = shape_frames(
-            Rect { x, width, border: 2., ..PLAIN },
-            1.,
-            RenderingRotation::NoRotation,
-        );
+        let (frame, lines) =
+            shape_frames(Rect { x, width, border: 2., ..PLAIN }, 1., RenderingRotation::NoRotation);
         let white = Rgb8Pixel::new(255, 255, 255);
         assert!(frame.pixels.iter().all(|p| *p == white), "x {x}, width {width}");
         assert!(lines.pixels.iter().all(|p| *p == white), "x {x}, width {width}, by line");
