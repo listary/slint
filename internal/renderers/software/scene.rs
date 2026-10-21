@@ -558,10 +558,13 @@ pub struct LinearGradientCommand {
     pub flags: u8,
     /// If positive, the clip has the same meaning as in RoundedRectangle.
     /// If negative, that means the "stop" is only starting or stopping at that point
-    pub left_clip: PhysicalLength,
-    pub right_clip: PhysicalLength,
-    pub top_clip: PhysicalLength,
-    pub bottom_clip: PhysicalLength,
+    ///
+    /// LISTARY PATCH (far-geometry): 32-bit, so a gradient reaching past the 16-bit range keeps
+    /// its exact clips.
+    pub left_clip: Length<i32, PhysicalPx>,
+    pub right_clip: Length<i32, PhysicalPx>,
+    pub top_clip: Length<i32, PhysicalPx>,
+    pub bottom_clip: Length<i32, PhysicalPx>,
 }
 
 /// Radial gradient that interpolates colors from the center outward

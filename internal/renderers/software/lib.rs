@@ -1676,6 +1676,13 @@ fn process_rectangle_impl(
     scale_factor: ScaleFactor,
 ) {
     let geom = args.geometry();
+    // LISTARY PATCH (far-geometry): geometry that isn't finite draws nothing.
+    if ![geom.origin.x, geom.origin.y, geom.size.width, geom.size.height]
+        .iter()
+        .all(|v| v.is_finite())
+    {
+        return;
+    }
     let Some(clipped) = geom.intersection(&clip.cast()) else { return };
     let geom_w = geom.width();
     let geom_h = geom.height();
@@ -1732,15 +1739,16 @@ fn process_rectangle_impl(
 
             idx += 1;
 
+            // LISTARY PATCH (far-geometry): 32-bit clips, see `LinearGradientCommand`.
             let (adjust_left, adjust_right) = if (angle % 180) > 90 {
                 (
-                    (geom.width() * s1.position).floor() as i16,
-                    (geom.width() * (1. - s2.position)).ceil() as i16,
+                    (geom.width() * s1.position).floor() as i32,
+                    (geom.width() * (1. - s2.position)).ceil() as i32,
                 )
             } else {
                 (
-                    (geom.width() * (1. - s2.position)).ceil() as i16,
-                    (geom.width() * s1.position).floor() as i16,
+                    (geom.width() * (1. - s2.position)).ceil() as i32,
+                    (geom.width() * s1.position).floor() as i32,
                 )
             };
 
@@ -1750,20 +1758,26 @@ fn process_rectangle_impl(
                 start,
                 flags,
                 top_clip: Length::new(
-                    (clipped.min_y() - geom.min_y() - (geom.height() * s1.position).floor()) as i16,
+                    (clipped.min_y() - geom.min_y() - (geom.height() * s1.position).floor()) as i32,
                 ),
                 bottom_clip: Length::new(
                     (geom.max_y() - clipped.max_y() - (geom.height() * (1. - s2.position)).ceil())
-                        as i16,
+                        as i32,
                 ),
-                left_clip: Length::new((clipped.min_x() - geom.min_x()) as i16 - adjust_left),
-                right_clip: Length::new((geom.max_x() - clipped.max_x()) as i16 - adjust_right),
+                left_clip: Length::new(
+                    ((clipped.min_x() - geom.min_x()) as i32).saturating_sub(adjust_left),
+                ),
+                right_clip: Length::new(
+                    ((geom.max_x() - clipped.max_x()) as i32).saturating_sub(adjust_right),
+                ),
             };
 
-            let act_rect = clipped.round().cast();
-            let size_y = act_rect.height_length() + gr.top_clip + gr.bottom_clip;
-            let size_x = act_rect.width_length() + gr.left_clip + gr.right_clip;
-            if size_x.get() == 0 || size_y.get() == 0 {
+            let act_rect: PhysicalRect = clipped.round().cast();
+            let size_y =
+                act_rect.height() as i64 + gr.top_clip.get() as i64 + gr.bottom_clip.get() as i64;
+            let size_x =
+                act_rect.width() as i64 + gr.left_clip.get() as i64 + gr.right_clip.get() as i64;
+            if size_x == 0 || size_y == 0 {
                 // the position are too close to each other
                 // FIXME: For the first or the last, we should draw a plain color to the end
                 continue;
@@ -1852,6 +1866,9 @@ fn process_rectangle_impl(
     if !radius.is_zero() {
         // Add a small value to make sure that the clip is always positive despite floating point shenanigans
         const E: f32 = 0.00001;
+        // LISTARY PATCH (far-geometry): a clip only matters up to the radius and the border width,
+        // which are far below this. The drawing adds the window to it in 16 bits.
+        const MAX_CLIP: f32 = 8192.;
 
         processor.process_rounded_rectangle(
             clipped.round().cast(),
@@ -1860,30 +1877,44 @@ fn process_rectangle_impl(
                 width: border,
                 border_color,
                 inner_color: color,
-                top_clip: PhysicalLength::new((clipped.min_y() - geom.min_y() + E) as _),
-                bottom_clip: PhysicalLength::new((geom.max_y() - clipped.max_y() + E) as _),
-                left_clip: PhysicalLength::new((clipped.min_x() - geom.min_x() + E) as _),
-                right_clip: PhysicalLength::new((geom.max_x() - clipped.max_x() + E) as _),
+                top_clip: PhysicalLength::new(
+                    (clipped.min_y() - geom.min_y() + E).min(MAX_CLIP) as _
+                ),
+                bottom_clip: PhysicalLength::new(
+                    (geom.max_y() - clipped.max_y() + E).min(MAX_CLIP) as _,
+                ),
+                left_clip: PhysicalLength::new(
+                    (clipped.min_x() - geom.min_x() + E).min(MAX_CLIP) as _
+                ),
+                right_clip: PhysicalLength::new(
+                    (geom.max_x() - clipped.max_x() + E).min(MAX_CLIP) as _
+                ),
             },
         );
         return;
     }
 
+    // LISTARY PATCH (far-geometry): the fill and the border strips are clipped before they are
+    // converted to the 16-bit range, so geometry reaching past it still draws its visible part.
+    // `geom` and `clip` are whole pixels by now, so this picks the same pixels as converting
+    // first would, wherever that conversion fits.
+    let clip_f32 = clip.cast::<f32>();
+    let fits = |r: euclid::Rect<f32, PhysicalPx>| r.intersection(&clip_f32)?.try_cast::<i16>();
+
     if color.alpha > 0
-        && let Some(r) =
-            geom.round().cast().inflate(-border.get(), -border.get()).intersection(clip)
+        && let Some(r) = fits(geom.round().inflate(-border.get() as f32, -border.get() as f32))
     {
         processor.process_simple_rectangle(r, color);
     }
 
     if border_color.alpha > 0 {
-        let mut add_border = |r: PhysicalRect| {
-            if let Some(r) = r.intersection(clip) {
+        let mut add_border = |r: euclid::Rect<f32, PhysicalPx>| {
+            if let Some(r) = fits(r) {
                 processor.process_simple_rectangle(r, border_color);
             }
         };
-        let b = border.get();
-        let g = geom.round().cast();
+        let b = border.get() as f32;
+        let g = geom.round();
         add_border(euclid::rect(g.min_x(), g.min_y(), g.width(), b));
         add_border(euclid::rect(g.min_x(), g.min_y() + g.height() - b, g.width(), b));
         add_border(euclid::rect(g.min_x(), g.min_y() + b, b, g.height() - b - b));
@@ -3269,12 +3300,18 @@ impl<T: ProcessScene> i_slint_core::item_rendering::ItemRenderer for SceneBuilde
         let physical_geom_f32 =
             geom.translate(self.current_state.offset.to_vector()).cast() * self.scale_factor;
         let rounded_geom = physical_geom_f32.round();
-        let physical_geom = rounded_geom.cast().transformed(self.rotation);
-
-        let rotation = RotationInfo {
-            orientation: self.rotation.orientation,
-            screen_size: rounded_geom.size.cast::<i16>() + euclid::size2(1, 1),
+        // LISTARY PATCH (far-geometry): a path is fitted and stroked against its whole box, so
+        // one whose box doesn't fit the 16-bit range is skipped rather than cut to the clip.
+        let Some(unrotated_geom) = rounded_geom.try_cast::<i16>() else {
+            return;
         };
+        let Some(screen_size) = (rounded_geom.size + euclid::size2(1., 1.)).try_cast::<i16>()
+        else {
+            return;
+        };
+        let physical_geom = unrotated_geom.transformed(self.rotation);
+
+        let rotation = RotationInfo { orientation: self.rotation.orientation, screen_size };
 
         let offset = offset * self.scale_factor + (physical_geom_f32.origin - rounded_geom.origin);
 
@@ -3282,12 +3319,15 @@ impl<T: ProcessScene> i_slint_core::item_rendering::ItemRenderer for SceneBuilde
         let zeno_commands =
             path::convert_path_data_to_zeno(path_iterator, rotation, self.scale_factor, offset);
 
-        let physical_clip =
+        let Some(physical_clip) =
             (self.current_state.clip.translate(self.current_state.offset.to_vector()).cast()
                 * self.scale_factor)
                 .round()
-                .cast::<i16>()
-                .transformed(self.rotation);
+                .try_cast::<i16>()
+        else {
+            return;
+        };
+        let physical_clip = physical_clip.transformed(self.rotation);
 
         // Clip the geometry - early return if nothing to draw
         let Some(clipped_geom) = physical_geom.intersection(&physical_clip) else {
@@ -3616,21 +3656,24 @@ impl<T: ProcessScene> sharedparley::GlyphRenderer for SceneBuilder<'_, T> {
         // quantizes the glyph origin and the clip it cuts glyphs with. Truncating here puts a
         // selection highlight edge a whole pixel away from the glyph clip meant to line up with it,
         // as soon as the item's own offset lands on a fractional device pixel.
-        let geometry: PhysicalRect = physical_rect.round().cast().transformed(self.rotation);
+        // LISTARY PATCH (far-geometry): the fill stays in f32 until `process_rectangle_impl` has
+        // clipped it. A selection highlight in a long line reaches past the 16-bit range.
+        let geometry = physical_rect.round().transformed(self.rotation);
         // These fills reach the processor directly rather than through `draw_rectangle`, so they
         // have to bring the clip along themselves. Without it a text decoration, a selection
         // highlight or a cursor taller than the item it belongs to paints right over its
         // surroundings, while the glyphs beside it are clipped.
-        let clip =
+        let Some(clip) =
             (self.current_state.clip.translate(self.current_state.offset.to_vector()).cast()
                 * self.scale_factor)
                 .round()
-                .cast()
-                .transformed(self.rotation);
-        let mut args = target_pixel_buffer::DrawRectangleArgs::from_rect(
-            geometry.cast(),
-            Brush::SolidColor(color),
-        );
+                .try_cast::<i16>()
+        else {
+            return;
+        };
+        let clip = clip.transformed(self.rotation);
+        let mut args =
+            target_pixel_buffer::DrawRectangleArgs::from_rect(geometry, Brush::SolidColor(color));
 
         if radius.get() > 0.0 {
             let r = radius.get().min(args.width / 2.0).min(args.height / 2.0);

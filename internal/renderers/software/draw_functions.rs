@@ -536,9 +536,11 @@ pub(super) fn draw_linear_gradient(
     let fill_col2 = g.flags & 0b100 != 0;
     let invert_slope = g.flags & 0b1 != 0;
 
-    let y = (line.get() - rect.min_y() + g.top_clip.get()) as i32;
-    let size_y = (rect.height() + g.top_clip.get() + g.bottom_clip.get()) as i32;
-    let start = g.start as i32;
+    // LISTARY PATCH (far-geometry): the clips of a gradient reaching past the 16-bit range don't
+    // fit 16 bits, and products of them don't fit 32.
+    let y = (line.get() - rect.min_y()) as i64 + g.top_clip.get() as i64;
+    let size_y = rect.height() as i64 + g.top_clip.get() as i64 + g.bottom_clip.get() as i64;
+    let start = g.start as i64;
 
     let (mut color1, mut color2) = (g.color1, g.color2);
 
@@ -555,14 +557,15 @@ pub(super) fn draw_linear_gradient(
         return;
     }
 
-    let size_x = (rect.width() + g.left_clip.get() + g.right_clip.get()) as i32;
+    let size_x = rect.width() as i64 + g.left_clip.get() as i64 + g.right_clip.get() as i64;
 
     let mut x = if invert_slope {
-        (y * size_x * (255 - start)) / (size_y * start)
+        (y as i128 * size_x as i128 * (255 - start) as i128) / (size_y * start) as i128
     } else {
-        (size_y - y) * size_x * (255 - start) / (size_y * start)
-    } + g.left_clip.get() as i32
-        + extra_left_clip as i32;
+        (size_y - y) as i128 * size_x as i128 * (255 - start) as i128 / (size_y * start) as i128
+    } as i64
+        + g.left_clip.get() as i64
+        + extra_left_clip as i64;
 
     let len = ((255 * size_x) / start) as usize;
 
@@ -599,15 +602,17 @@ pub(super) fn draw_linear_gradient(
         core::mem::swap(&mut color1, &mut color2);
     }
 
-    let dr = (((color2.red as i32 - color1.red as i32) * start) << 15) / (255 * size_x);
-    let dg = (((color2.green as i32 - color1.green as i32) * start) << 15) / (255 * size_x);
-    let db = (((color2.blue as i32 - color1.blue as i32) * start) << 15) / (255 * size_x);
-    let da = (((color2.alpha as i32 - color1.alpha as i32) * start) << 15) / (255 * size_x);
+    let dr = ((((color2.red as i64 - color1.red as i64) * start) << 15) / (255 * size_x)) as i32;
+    let dg =
+        ((((color2.green as i64 - color1.green as i64) * start) << 15) / (255 * size_x)) as i32;
+    let db = ((((color2.blue as i64 - color1.blue as i64) * start) << 15) / (255 * size_x)) as i32;
+    let da =
+        ((((color2.alpha as i64 - color1.alpha as i64) * start) << 15) / (255 * size_x)) as i32;
 
-    let mut r = ((color1.red as u32) << 15).wrapping_add((x * dr) as _);
-    let mut g = ((color1.green as u32) << 15).wrapping_add((x * dg) as _);
-    let mut b = ((color1.blue as u32) << 15).wrapping_add((x * db) as _);
-    let mut a = ((color1.alpha as u32) << 15).wrapping_add((x * da) as _);
+    let mut r = ((color1.red as u32) << 15).wrapping_add((x * dr as i64) as _);
+    let mut g = ((color1.green as u32) << 15).wrapping_add((x * dg as i64) as _);
+    let mut b = ((color1.blue as u32) << 15).wrapping_add((x * db as i64) as _);
+    let mut a = ((color1.alpha as u32) << 15).wrapping_add((x * da as i64) as _);
 
     if color1.alpha == 255 && color2.alpha == 255 {
         buffer.fill_with(|| {
