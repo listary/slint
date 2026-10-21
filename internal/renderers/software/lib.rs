@@ -1866,9 +1866,19 @@ fn process_rectangle_impl(
     if !radius.is_zero() {
         // Add a small value to make sure that the clip is always positive despite floating point shenanigans
         const E: f32 = 0.00001;
-        // LISTARY PATCH (far-geometry): a clip only matters up to the radius and the border width,
-        // which are far below this. The drawing adds the window to it in 16 bits.
-        const MAX_CLIP: f32 = 8192.;
+        // LISTARY PATCH (far-geometry): `draw_rounded_rectangle_line` compares a clip, less one
+        // for the bottom clip, only with the radii and the border width, so a clip beyond `reach`
+        // draws the same. It adds a clip to the span in 16 bits, which the second cap keeps in
+        // range. That cap never binds for a rectangle that fits 16 bits.
+        let reach = radius
+            .top_left
+            .max(radius.top_right)
+            .max(radius.bottom_right)
+            .max(radius.bottom_left)
+            .max(border.get()) as f32
+            + 1.;
+        let max_x = reach.min(i16::MAX as f32 - clipped.width().ceil() - 1.);
+        let max_y = reach.min(i16::MAX as f32 - clipped.height().ceil() - 1.);
 
         processor.process_rounded_rectangle(
             clipped.round().cast(),
@@ -1878,16 +1888,16 @@ fn process_rectangle_impl(
                 border_color,
                 inner_color: color,
                 top_clip: PhysicalLength::new(
-                    (clipped.min_y() - geom.min_y() + E).min(MAX_CLIP) as _
+                    (clipped.min_y() - geom.min_y() + E).min(max_y) as _
                 ),
                 bottom_clip: PhysicalLength::new(
-                    (geom.max_y() - clipped.max_y() + E).min(MAX_CLIP) as _,
+                    (geom.max_y() - clipped.max_y() + E).min(max_y) as _,
                 ),
                 left_clip: PhysicalLength::new(
-                    (clipped.min_x() - geom.min_x() + E).min(MAX_CLIP) as _
+                    (clipped.min_x() - geom.min_x() + E).min(max_x) as _
                 ),
                 right_clip: PhysicalLength::new(
-                    (geom.max_x() - clipped.max_x() + E).min(MAX_CLIP) as _
+                    (geom.max_x() - clipped.max_x() + E).min(max_x) as _
                 ),
             },
         );
