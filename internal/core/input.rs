@@ -3473,10 +3473,20 @@ mod tests {
         assert_eq!(press_at(&clicks, &ctx, 30_000), 0);
         assert_eq!(press_at(&clicks, &ctx, 31_000), 0);
 
+        // The clock went back while it was observed, to a reading still later than the last
+        // press: the presses are ten seconds apart, so they are no double click either.
+        let clicks = ClickState::default();
+        assert_eq!(press_at(&clicks, &ctx, 60_000), 0);
+        crate::animations::test_clock::set_reading(70_000);
+        crate::animations::Instant::now(&ctx);
+        assert_eq!(press_at(&clicks, &ctx, 60_100), 0);
+        // Quick presses after that still are.
+        assert_eq!(press_at(&clicks, &ctx, 60_200), 1);
+
         // A clock that only goes forward counts as before.
         let clicks = ClickState::default();
-        assert_eq!(press_at(&clicks, &ctx, 50_000), 0);
-        assert_eq!(press_at(&clicks, &ctx, 50_200), 1);
-        assert_eq!(press_at(&clicks, &ctx, 51_000), 0);
+        assert_eq!(press_at(&clicks, &ctx, 80_000), 0);
+        assert_eq!(press_at(&clicks, &ctx, 80_200), 1);
+        assert_eq!(press_at(&clicks, &ctx, 81_000), 0);
     }
 }
