@@ -228,23 +228,41 @@ impl Instant {
     ///
     /// The returned instants never go back, even when the platform's clock does.
     pub fn now(ctx: &crate::SlintContext) -> Self {
-        // LISTARY PATCH (clock-goes-back): Windows' performance counter goes back a little on
-        // some machines. Holding the latest reading keeps every consumer's subtraction in range.
-        let latest = ctx.0.latest_instant.get().max(Self::now_unclamped(ctx));
-        ctx.0.latest_instant.set(latest);
-        latest
-    }
-
-    /// LISTARY PATCH (clock-goes-back): the platform's reading, which can be earlier than a
-    /// previous one. For comparing two readings that must not appear simultaneous just because
-    /// [`Self::now`] held its value while the clock caught up.
-    pub(crate) fn now_unclamped(ctx: &crate::SlintContext) -> Self {
-        Self(ctx.platform().duration_since_start().as_millis() as u64)
+        ClockSample::take(ctx).held
     }
 
     /// Return the number of milliseconds this `Instant` is after the backend has started
     pub fn as_millis(&self) -> u64 {
         self.0
+    }
+}
+
+/// LISTARY PATCH (clock-goes-back): a reading of a context's clock.
+///
+/// Windows' performance counter goes back a little on some machines.
+/// [`Instant::now`] holds the latest reading, which keeps every consumer's subtraction in range.
+/// Comparing two raw readings is only meaningful when no jump back was seen in between.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct ClockSample {
+    /// The platform's reading, which can be earlier than a previous one.
+    pub reading: Instant,
+    /// The latest reading so far.
+    pub held: Instant,
+    /// How many times a reading came in earlier than the one before.
+    pub jumps_back: u32,
+}
+
+impl ClockSample {
+    pub(crate) fn take(ctx: &crate::SlintContext) -> Self {
+        let reading = Instant(ctx.platform().duration_since_start().as_millis() as u64);
+        let last = ctx.0.clock.get();
+        let sample = Self {
+            reading,
+            held: last.held.max(reading),
+            jumps_back: last.jumps_back.wrapping_add(u32::from(reading < last.reading)),
+        };
+        ctx.0.clock.set(sample);
+        sample
     }
 }
 

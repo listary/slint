@@ -1354,7 +1354,8 @@ pub enum FocusEvent {
 /// This state is used to count the clicks separated by [`crate::platform::Platform::click_interval`]
 #[derive(Default)]
 pub struct ClickState {
-    click_count_time_stamp: Cell<Option<crate::animations::Instant>>,
+    /// LISTARY PATCH (clock-goes-back): a clock sample rather than an instant, see `check_repeat`.
+    click_count_time_stamp: Cell<Option<crate::animations::ClockSample>>,
     click_count: Cell<u8>,
     click_position: Cell<LogicalPoint>,
     click_button: Cell<PointerEventButton>,
@@ -1366,7 +1367,7 @@ impl ClickState {
         &self,
         position: LogicalPoint,
         button: PointerEventButton,
-        now: crate::animations::Instant,
+        now: crate::animations::ClockSample,
     ) {
         self.click_count.set(0);
         self.click_count_time_stamp.set(Some(now));
@@ -1387,13 +1388,14 @@ impl ClickState {
         let click_interval = ctx.platform().click_interval();
         match mouse_event {
             MouseEvent::Pressed { position, button, touch_finger_id, .. } => {
-                // LISTARY PATCH (clock-goes-back): an earlier reading than the last press means
-                // the clock went back in between, so the presses are not a double click.
-                let instant_now = crate::animations::Instant::now_unclamped(ctx);
+                // LISTARY PATCH (clock-goes-back): presses with the clock going back in between
+                // are no double click. Otherwise the raw readings tell how far apart they are,
+                // since the held clock reads the same while it waits to catch up.
+                let instant_now = crate::animations::ClockSample::take(ctx);
 
                 if let Some(click_count_time_stamp) = self.click_count_time_stamp.get() {
-                    if instant_now >= click_count_time_stamp
-                        && instant_now - click_count_time_stamp < click_interval
+                    if instant_now.jumps_back == click_count_time_stamp.jumps_back
+                        && instant_now.reading - click_count_time_stamp.reading < click_interval
                         && button == self.click_button.get()
                         && (position - self.click_position.get()).square_length() < 100 as _
                     {
