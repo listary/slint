@@ -3430,4 +3430,50 @@ mod tests {
         };
         assert!(k.matches(&event), "Return key should match Return event");
     }
+
+    /// LISTARY PATCH (clock-goes-back): a press at `millis` on the test clock, at the origin.
+    #[cfg(feature = "std")]
+    fn press_at(clicks: &ClickState, ctx: &crate::SlintContext, millis: u64) -> u8 {
+        crate::animations::test_clock::set_reading(millis);
+        let press = MouseEvent::Pressed {
+            position: LogicalPoint::default(),
+            button: PointerEventButton::Left,
+            click_count: 0,
+            touch_finger_id: 0,
+        };
+        match clicks.check_repeat(press, ctx) {
+            MouseEvent::Pressed { click_count, .. } => click_count,
+            event => panic!("expected Pressed, got {event:?}"),
+        }
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn double_click_across_a_clock_that_went_back() {
+        let ctx = crate::animations::test_clock::context();
+
+        // A press before the clock went back and one after it are never a double click.
+        let clicks = ClickState::default();
+        assert_eq!(press_at(&clicks, &ctx, 20_000), 0);
+        assert_eq!(press_at(&clicks, &ctx, 10_000), 0);
+
+        // After it went back, presses within the interval are a double click...
+        let clicks = ClickState::default();
+        assert_eq!(press_at(&clicks, &ctx, 30_000), 0);
+        assert_eq!(press_at(&clicks, &ctx, 20_000), 0);
+        assert_eq!(press_at(&clicks, &ctx, 20_100), 1);
+
+        // ... and presses a second apart are not, though a clock that only goes forward
+        // would still be held at the reading from before.
+        let clicks = ClickState::default();
+        assert_eq!(press_at(&clicks, &ctx, 40_000), 0);
+        assert_eq!(press_at(&clicks, &ctx, 30_000), 0);
+        assert_eq!(press_at(&clicks, &ctx, 31_000), 0);
+
+        // A clock that only goes forward counts as before.
+        let clicks = ClickState::default();
+        assert_eq!(press_at(&clicks, &ctx, 50_000), 0);
+        assert_eq!(press_at(&clicks, &ctx, 50_200), 1);
+        assert_eq!(press_at(&clicks, &ctx, 51_000), 0);
+    }
 }
