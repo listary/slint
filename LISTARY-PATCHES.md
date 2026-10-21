@@ -137,7 +137,7 @@ Listary 7.1.0.37 里断言 4 次、转换 3 次，共 4 个用户；倍数正好
 测试（`cargo test -p slint --no-default-features --features std,compat-1-2,renderer-software --test software_renderer_far_geometry --test software_renderer_far_geometry_pixels`）：
 
 - `software_renderer_far_geometry.rs`：复现线上那几种选区、光标、超宽矩形，改前 7 条 panic。
-- `software_renderer_far_geometry_pixels.rs`：每个超出范围的图元配一个只在窗口外不同的「近处双胞胎」，两者逐像素比较，整块缓冲和逐行渲染两条路径都比。覆盖纯色、边框、圆角、渐变的矩形在 1/1.25/1.5/2 倍下、三种旋转、正好在 ±32767/32768 边上；约 6 万像素长的选区（滑到末尾和不滑）；NaN 和无穷大不画；超出范围的 Path 跳过。改前 6 条全部 panic。旋转四分之一圈的竖直渐变允许差 1：角度经过 f32 的 `tan`（90° 或 270° 处很大但有限），渐变略斜，斜多少随长度变，双胞胎的颜色差 1。
+- `software_renderer_far_geometry_pixels.rs`：每个超出范围的图元配一个只在窗口外不同的「近处双胞胎」，两者逐像素比较，整块缓冲和逐行渲染两条路径都比。覆盖纯色、边框、圆角、渐变的矩形在 1/1.25/1.5/2 倍下、三种旋转、正好在 ±32767/32768 边上；约 6 万像素长的选区（滑到末尾和不滑）；NaN 和无穷大不画；超出范围的 Path 跳过。改前 6 条全部 panic。旋转 90° 时竖直渐变允许差 1：没打补丁的 v1.18.1 上，两个都在 16 位范围里、只长度不同的渐变矩形转 90° 后颜色就差 1，不是这处补丁带来的。
 
 升级：上游 master 仍是先转换后裁剪。上游不改就把这些处挑过去。
 

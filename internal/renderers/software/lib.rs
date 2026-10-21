@@ -1896,7 +1896,7 @@ fn process_rectangle_impl(
 
     // LISTARY PATCH (far-geometry): the fill and the border strips are clipped before they are
     // converted to the 16-bit range, so geometry reaching past it still draws its visible part.
-    // `geom` and `clip` are whole pixels by now, so this picks the same pixels as converting
+    // `geom.round()` and `clip` are whole pixels, so this picks the same pixels as converting
     // first would, wherever that conversion fits.
     let clip_f32 = clip.cast::<f32>();
     let fits = |r: euclid::Rect<f32, PhysicalPx>| r.intersection(&clip_f32)?.try_cast::<i16>();

@@ -202,12 +202,9 @@ fn assert_renders_like(far: Rect, near: Rect, scale: f32, rotation: RenderingRot
     let what = format!("{far:?} like {near:?} at {scale}x, {rotation:?}");
     let (far_frame, far_lines) = shape_frames(far, scale, rotation);
     let (near_frame, near_lines) = shape_frames(near, scale, rotation);
-    // Turned a quarter, a vertical gradient's angle goes through `tan` of 90° or 270°. That is
-    // large but finite in f32, so the gradient slants a little, by an amount that grows with the
-    // shape's length, and the twins' colors differ by one.
-    let quarter_turn =
-        matches!(rotation, RenderingRotation::Rotate90 | RenderingRotation::Rotate270);
-    let tolerance = if far.gradient && quarter_turn { 1 } else { 0 };
+    // Turned 90°, a vertical gradient's colors already shift by one with the shape's length,
+    // also between two shapes that fit the 16-bit range.
+    let tolerance = if far.gradient && rotation == RenderingRotation::Rotate90 { 1 } else { 0 };
     assert_close(&far_frame, &near_frame, tolerance, &what);
     assert_close(&far_lines, &near_lines, tolerance, &format!("{what}, by line"));
     // The near shape must show up, or the comparison proves nothing.
