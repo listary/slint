@@ -73,6 +73,10 @@ pub(crate) struct SlintContextInner {
     /// The timers registered on this context. Shared, so that `Timer` handles can hold a
     /// `Weak` to the list they registered in without knowing which context owns it.
     pub(crate) timers: crate::timers::TimerListRc,
+
+    /// LISTARY PATCH (clock-goes-back): the latest reading of this context's clock, see
+    /// [`crate::animations::Instant::now`].
+    pub(crate) latest_instant: Cell<crate::animations::Instant>,
 }
 
 /// This context is meant to hold the state and the backend.
@@ -134,6 +138,7 @@ impl SlintContext {
             // list; take it over so those timers keep working. It is the very list they
             // hold a `Weak` to, so nothing needs fixing up.
             timers: crate::timers::take_pending_timers(),
+            latest_instant: Cell::default(),
         }));
         // The list's deadlines are measured on this context's clock from now on. Done after
         // construction because it needs a handle to the context that owns it.

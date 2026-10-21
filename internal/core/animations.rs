@@ -225,7 +225,20 @@ impl Instant {
     /// Takes the context rather than reaching for an ambient one because the origin is the
     /// platform's start time: instants from different contexts are not comparable, so the
     /// caller has to say which clock it means.
+    ///
+    /// The returned instants never go back, even when the platform's clock does.
     pub fn now(ctx: &crate::SlintContext) -> Self {
+        // LISTARY PATCH (clock-goes-back): Windows' performance counter goes back a little on
+        // some machines. Holding the latest reading keeps every consumer's subtraction in range.
+        let latest = ctx.0.latest_instant.get().max(Self::now_unclamped(ctx));
+        ctx.0.latest_instant.set(latest);
+        latest
+    }
+
+    /// LISTARY PATCH (clock-goes-back): the platform's reading, which can be earlier than a
+    /// previous one. For comparing two readings that must not appear simultaneous just because
+    /// [`Self::now`] held its value while the clock caught up.
+    pub(crate) fn now_unclamped(ctx: &crate::SlintContext) -> Self {
         Self(ctx.platform().duration_since_start().as_millis() as u64)
     }
 
@@ -259,8 +272,9 @@ impl AnimationDriver {
     /// the windowing system driver for every frame.
     pub fn update_animations(&self, new_tick: Instant) {
         let current_tick = self.global_instant.as_ref().get_untracked();
-        assert!(current_tick <= new_tick, "The platform's clock is not monotonic!");
-        if current_tick != new_tick {
+        // LISTARY PATCH (clock-goes-back): an earlier tick holds the animations where they are.
+        // It still comes in when contexts with different clock origins drive this thread.
+        if current_tick < new_tick {
             self.active_animations.set(false);
             self.global_instant.as_ref().set(new_tick);
         }

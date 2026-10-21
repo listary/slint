@@ -1387,10 +1387,13 @@ impl ClickState {
         let click_interval = ctx.platform().click_interval();
         match mouse_event {
             MouseEvent::Pressed { position, button, touch_finger_id, .. } => {
-                let instant_now = crate::animations::Instant::now(ctx);
+                // LISTARY PATCH (clock-goes-back): an earlier reading than the last press means
+                // the clock went back in between, so the presses are not a double click.
+                let instant_now = crate::animations::Instant::now_unclamped(ctx);
 
                 if let Some(click_count_time_stamp) = self.click_count_time_stamp.get() {
-                    if instant_now - click_count_time_stamp < click_interval
+                    if instant_now >= click_count_time_stamp
+                        && instant_now - click_count_time_stamp < click_interval
                         && button == self.click_button.get()
                         && (position - self.click_position.get()).square_length() < 100 as _
                     {

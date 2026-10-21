@@ -51,7 +51,20 @@
 
 测试：`platform.rs` 的 `a_clock_that_goes_back_counts_as_no_time_elapsed`（`cargo test -p i-slint-core --lib a_clock_that_goes_back`），改前 panic。
 
-升级：上游 v1.18.1 之后的 master 仍是这句断言（上游把它当成发现坏时钟的手段，见 slint-ui/slint#3491）。上游不改就把这处挑过去。
+这一处只保证读数不早于起点，不保证不早于上一次。动画驱动 `AnimationDriver::update_animations`（`animations.rs`）还有同一句断言，7.1.0.43、45 上崩在那里（LISTARY-5FF）。第二轮改动：
+
+- `animations::Instant::now(ctx)` 在 `SlintContext` 里记住最新读数，返回「这次和最新取大」。动画、定时器、帧统计都从这里取时刻，时钟倒退时停在原处，等真实时间追上来再走，停的时长等于倒退量。各上下文各记各的。
+- `update_animations` 的断言改成判断：新时刻不晚于当前就不更新。一个线程上有起点不同的几个上下文时，仍会收到更早的时刻。
+- 双击判断（`input.rs` 的 `ClickState::check_repeat`）改用未经取大的原始读数 `Instant::now_unclamped`。读数早于上一次按下，说明中间时钟倒退过，一律不算双击；否则照常比间隔。用取大后的时刻会把倒退后隔了很久的两次点击当成同一时刻，误认成双击。
+
+测试（`cargo test -p i-slint-core --lib -- goes_back went_back`，改前全部 panic）：
+- `animations.rs` 的 `instant_now_holds_while_the_clock_goes_back`：倒退 10 秒后停在原值，追上后照常前进；
+- `animations.rs` 的 `an_event_loop_turn_after_the_clock_went_back_keeps_animations_and_timers_in_order`：事件循环在倒退后跑一轮不崩，定时器按追上后的时间触发；
+- `properties_animations.rs` 的 `properties_test_animation_holds_while_the_tick_goes_back`：动画既不倒退，也不跳到终点；
+- `input.rs` 的 `double_click_across_a_clock_that_went_back`：跨过倒退的两次按下不算双击；倒退后间隔内的两次算；倒退后隔 1 秒的两次不算；时钟正常时不变。
+- `api/rs/slint/tests/animation_clock_goes_back.rs`：经 `slint::platform::update_timers_and_animations` 走一遍事件循环。
+
+升级：上游 v1.18.1 之后的 master 仍是这两句断言（上游把它当成发现坏时钟的手段，见 slint-ui/slint#3491）。上游不改就把这几处挑过去。
 
 ## `i-slint-renderer-software`（`internal/renderers/software`）
 
