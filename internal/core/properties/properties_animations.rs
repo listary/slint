@@ -806,6 +806,41 @@ mod animation_tests {
     }
 
     #[test]
+    fn properties_test_animation_holds_while_the_tick_goes_back() {
+        // Windows' performance counter goes back a little on some machines. The driver used
+        // to assert that the tick never does, and took down the application.
+        let compo = Component::new_test_component();
+
+        let animation_details = PropertyAnimation {
+            duration: DURATION.as_millis() as _,
+            iteration_count: 1.,
+            ..PropertyAnimation::default()
+        };
+
+        compo.width.set(100);
+        let start_time = crate::animations::current_tick();
+        set_animated_value(&compo.width, 200, animation_details);
+
+        crate::animations::CURRENT_ANIMATION_DRIVER
+            .with(|driver| driver.update_animations(start_time + DURATION / 2));
+        assert_eq!(get_prop_value(&compo.width), 150);
+
+        // Neither runs backwards nor jumps to the end.
+        crate::animations::CURRENT_ANIMATION_DRIVER
+            .with(|driver| driver.update_animations(start_time + DURATION / 4));
+        assert_eq!(crate::animations::current_tick(), start_time + DURATION / 2);
+        assert_eq!(get_prop_value(&compo.width), 150);
+
+        crate::animations::CURRENT_ANIMATION_DRIVER
+            .with(|driver| driver.update_animations(start_time + DURATION * 3 / 4));
+        assert_eq!(get_prop_value(&compo.width), 175);
+
+        crate::animations::CURRENT_ANIMATION_DRIVER
+            .with(|driver| driver.update_animations(start_time + DURATION));
+        assert_eq!(get_prop_value(&compo.width), 200);
+    }
+
+    #[test]
     fn properties_test_animation_triggered_by_set() {
         let compo = Component::new_test_component();
 

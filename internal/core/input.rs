@@ -1354,7 +1354,8 @@ pub enum FocusEvent {
 /// This state is used to count the clicks separated by [`crate::platform::Platform::click_interval`]
 #[derive(Default)]
 pub struct ClickState {
-    click_count_time_stamp: Cell<Option<crate::animations::Instant>>,
+    /// LISTARY PATCH (clock-goes-back): a clock sample rather than an instant, see `check_repeat`.
+    click_count_time_stamp: Cell<Option<crate::animations::ClockSample>>,
     click_count: Cell<u8>,
     click_position: Cell<LogicalPoint>,
     click_button: Cell<PointerEventButton>,
@@ -1366,7 +1367,7 @@ impl ClickState {
         &self,
         position: LogicalPoint,
         button: PointerEventButton,
-        now: crate::animations::Instant,
+        now: crate::animations::ClockSample,
     ) {
         self.click_count.set(0);
         self.click_count_time_stamp.set(Some(now));
@@ -1387,10 +1388,14 @@ impl ClickState {
         let click_interval = ctx.platform().click_interval();
         match mouse_event {
             MouseEvent::Pressed { position, button, touch_finger_id, .. } => {
-                let instant_now = crate::animations::Instant::now(ctx);
+                // LISTARY PATCH (clock-goes-back): presses with the clock going back in between
+                // are no double click. Otherwise the raw readings tell how far apart they are,
+                // since the held clock reads the same while it waits to catch up.
+                let instant_now = crate::animations::ClockSample::take(ctx);
 
                 if let Some(click_count_time_stamp) = self.click_count_time_stamp.get() {
-                    if instant_now - click_count_time_stamp < click_interval
+                    if instant_now.jumps_back == click_count_time_stamp.jumps_back
+                        && instant_now.reading - click_count_time_stamp.reading < click_interval
                         && button == self.click_button.get()
                         && (position - self.click_position.get()).square_length() < 100 as _
                     {
@@ -3429,5 +3434,61 @@ mod tests {
             ..Default::default()
         };
         assert!(k.matches(&event), "Return key should match Return event");
+    }
+
+    /// LISTARY PATCH (clock-goes-back): a press at `millis` on the test clock, at the origin.
+    #[cfg(feature = "std")]
+    fn press_at(clicks: &ClickState, ctx: &crate::SlintContext, millis: u64) -> u8 {
+        crate::animations::test_clock::set_reading(millis);
+        let press = MouseEvent::Pressed {
+            position: LogicalPoint::default(),
+            button: PointerEventButton::Left,
+            click_count: 0,
+            touch_finger_id: 0,
+        };
+        match clicks.check_repeat(press, ctx) {
+            MouseEvent::Pressed { click_count, .. } => click_count,
+            event => panic!("expected Pressed, got {event:?}"),
+        }
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn double_click_across_a_clock_that_went_back() {
+        let ctx = crate::animations::test_clock::context();
+
+        // A press before the clock went back and one after it are never a double click.
+        let clicks = ClickState::default();
+        assert_eq!(press_at(&clicks, &ctx, 20_000), 0);
+        assert_eq!(press_at(&clicks, &ctx, 10_000), 0);
+
+        // After it went back, presses within the interval are a double click...
+        let clicks = ClickState::default();
+        assert_eq!(press_at(&clicks, &ctx, 30_000), 0);
+        assert_eq!(press_at(&clicks, &ctx, 20_000), 0);
+        assert_eq!(press_at(&clicks, &ctx, 20_100), 1);
+
+        // ... and presses a second apart are not, though a clock that only goes forward
+        // would still be held at the reading from before.
+        let clicks = ClickState::default();
+        assert_eq!(press_at(&clicks, &ctx, 40_000), 0);
+        assert_eq!(press_at(&clicks, &ctx, 30_000), 0);
+        assert_eq!(press_at(&clicks, &ctx, 31_000), 0);
+
+        // The clock went back while it was observed, to a reading still later than the last
+        // press: the presses are ten seconds apart, so they are no double click either.
+        let clicks = ClickState::default();
+        assert_eq!(press_at(&clicks, &ctx, 60_000), 0);
+        crate::animations::test_clock::set_reading(70_000);
+        crate::animations::Instant::now(&ctx);
+        assert_eq!(press_at(&clicks, &ctx, 60_100), 0);
+        // Quick presses after that still are.
+        assert_eq!(press_at(&clicks, &ctx, 60_200), 1);
+
+        // A clock that only goes forward counts as before.
+        let clicks = ClickState::default();
+        assert_eq!(press_at(&clicks, &ctx, 80_000), 0);
+        assert_eq!(press_at(&clicks, &ctx, 80_200), 1);
+        assert_eq!(press_at(&clicks, &ctx, 81_000), 0);
     }
 }

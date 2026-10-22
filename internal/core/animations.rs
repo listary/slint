@@ -225,13 +225,44 @@ impl Instant {
     /// Takes the context rather than reaching for an ambient one because the origin is the
     /// platform's start time: instants from different contexts are not comparable, so the
     /// caller has to say which clock it means.
+    ///
+    /// The returned instants never go back, even when the platform's clock does.
     pub fn now(ctx: &crate::SlintContext) -> Self {
-        Self(ctx.platform().duration_since_start().as_millis() as u64)
+        ClockSample::take(ctx).held
     }
 
     /// Return the number of milliseconds this `Instant` is after the backend has started
     pub fn as_millis(&self) -> u64 {
         self.0
+    }
+}
+
+/// LISTARY PATCH (clock-goes-back): a reading of a context's clock.
+///
+/// Windows' performance counter goes back a little on some machines.
+/// [`Instant::now`] holds the latest reading, which keeps every consumer's subtraction in range.
+/// Comparing two raw readings is only meaningful when no jump back was seen in between.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct ClockSample {
+    /// The platform's reading, which can be earlier than a previous one.
+    pub reading: Instant,
+    /// The latest reading so far.
+    pub held: Instant,
+    /// How many times a reading came in earlier than the one before.
+    pub jumps_back: u32,
+}
+
+impl ClockSample {
+    pub(crate) fn take(ctx: &crate::SlintContext) -> Self {
+        let reading = Instant(ctx.platform().duration_since_start().as_millis() as u64);
+        let last = ctx.0.clock.get();
+        let sample = Self {
+            reading,
+            held: last.held.max(reading),
+            jumps_back: last.jumps_back.wrapping_add(u32::from(reading < last.reading)),
+        };
+        ctx.0.clock.set(sample);
+        sample
     }
 }
 
@@ -259,8 +290,9 @@ impl AnimationDriver {
     /// the windowing system driver for every frame.
     pub fn update_animations(&self, new_tick: Instant) {
         let current_tick = self.global_instant.as_ref().get_untracked();
-        assert!(current_tick <= new_tick, "The platform's clock is not monotonic!");
-        if current_tick != new_tick {
+        // LISTARY PATCH (clock-goes-back): an earlier tick holds the animations where they are.
+        // It still comes in when contexts with different clock origins drive this thread.
+        if current_tick < new_tick {
             self.active_animations.set(false);
             self.global_instant.as_ref().set(new_tick);
         }
@@ -476,4 +508,80 @@ pub fn update_animations(now: Instant) {
         };
         driver.update_animations(Instant(duration))
     });
+}
+
+/// LISTARY PATCH (clock-goes-back): a context whose platform clock reads whatever the test
+/// sets, so tests can make it go back.
+#[cfg(all(test, feature = "std"))]
+pub(crate) mod test_clock {
+    use core::cell::Cell;
+    use core::time::Duration;
+
+    std::thread_local! {
+        static READING: Cell<Duration> = const { Cell::new(Duration::ZERO) };
+    }
+
+    struct ClockPlatform;
+
+    impl crate::platform::Platform for ClockPlatform {
+        fn create_window_adapter(
+            &self,
+        ) -> Result<alloc::rc::Rc<dyn crate::platform::WindowAdapter>, crate::api::PlatformError>
+        {
+            Err(crate::api::PlatformError::Other("not implemented".into()))
+        }
+        fn duration_since_start(&self) -> Duration {
+            READING.with(Cell::get)
+        }
+    }
+
+    pub(crate) fn context() -> crate::SlintContext {
+        crate::SlintContext::new(alloc::boxed::Box::new(ClockPlatform))
+    }
+
+    pub(crate) fn set_reading(millis: u64) {
+        READING.with(|reading| reading.set(Duration::from_millis(millis)));
+    }
+}
+
+#[cfg(all(test, feature = "std"))]
+#[test]
+fn instant_now_holds_while_the_clock_goes_back() {
+    let ctx = test_clock::context();
+
+    test_clock::set_reading(100_000);
+    assert_eq!(Instant::now(&ctx), Instant(100_000));
+
+    // Back by ten seconds: holds until the clock catches up, then moves on.
+    test_clock::set_reading(90_000);
+    assert_eq!(Instant::now(&ctx), Instant(100_000));
+    test_clock::set_reading(99_999);
+    assert_eq!(Instant::now(&ctx), Instant(100_000));
+    test_clock::set_reading(100_500);
+    assert_eq!(Instant::now(&ctx), Instant(100_500));
+}
+
+#[cfg(all(test, feature = "std"))]
+#[test]
+fn an_event_loop_turn_after_the_clock_went_back_keeps_animations_and_timers_in_order() {
+    let ctx = test_clock::context();
+    let fired = alloc::rc::Rc::new(Cell::new(0));
+    let fired_ = fired.clone();
+    let timer = ctx.new_timer();
+
+    test_clock::set_reading(1_000);
+    ctx.update_timers_and_animations();
+    timer.start(crate::timers::TimerMode::SingleShot, core::time::Duration::from_millis(500), {
+        move || fired_.set(fired_.get() + 1)
+    });
+
+    test_clock::set_reading(999);
+    ctx.update_timers_and_animations();
+    assert_eq!(current_tick(), Instant(1_000));
+    assert_eq!(fired.get(), 0);
+
+    test_clock::set_reading(1_500);
+    ctx.update_timers_and_animations();
+    assert_eq!(current_tick(), Instant(1_500));
+    assert_eq!(fired.get(), 1);
 }
