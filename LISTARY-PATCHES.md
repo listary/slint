@@ -70,7 +70,7 @@
 
 ## `i-slint-renderer-software`（`internal/renderers/software`）
 
-`internal/renderers/software` 相对 v1.18.1 除了下文「上游 PR 回移」和「圆角裁剪」两节，改了两处：局部重绘时，`Path` 只画在本次要重画的区域里；窗口尺寸和缓冲区对不上时不再 panic（见本节末「窗口尺寸大过缓冲区」）。
+`internal/renderers/software` 相对 v1.18.1 除了下文「上游 PR 回移」和「圆角裁剪」两节，改了三处：局部重绘时，`Path` 只画在本次要重画的区域里；窗口尺寸和缓冲区对不上时不再 panic（见本节末「窗口尺寸大过缓冲区」）；超出 16 位坐标的图元画可见部分、不再 panic（见「超出 16 位坐标的图元」）。
 
 ### 问题
 
@@ -117,6 +117,29 @@ Listary 7.1.0.37 里断言 4 次、转换 3 次，共 4 个用户；倍数正好
 这个测试不能带默认特性跑：slint 的开发依赖给软件渲染器开了 `testing` 特性，它的同名公开方法 `text_layout_cache` 会挡住 `sw.rs` 里对 `RendererSealed::text_layout_cache` 的调用，winit 后端编译不过。这是本分支原有的问题，与这处补丁无关。
 
 升级：上游 master 仍是这句断言。上游不改就把这处挑过去。
+
+### 超出 16 位坐标的图元
+
+软件渲染器的屏幕坐标是 16 位整数（±32767 像素）。几处在和裁剪区求交之前就把整块几何 `cast()` 成 16 位，转不了就在 euclid 里 `unwrap` panic。搜索框里选中很长的一行（100% 缩放下三千多个字符），选区高亮就有几万像素宽：Sentry 里 4 次（LISTARY-5GS、5H4），起点越界和宽度越界都有。
+
+改动（`LISTARY PATCH (far-geometry)`）：
+
+- `fill_rectangle`（选区、光标、下划线）：几何保持 f32 交给 `process_rectangle_impl`，不再先转 16 位。
+- `process_rectangle_impl` 的纯色填充和四条边框：先在 f32 下按原几何算好每一块，和裁剪区求交，再转 16 位。几何和裁剪区此时都是整数像素，所以在原来转得了的范围里，选中的像素和原来完全相同。
+- 位置或尺寸不是有限数（NaN、无穷大）的矩形不画。
+- 圆角矩形：离裁剪边的距离截到「最大圆角半径和边框宽中较大的那个加 1」。逐行绘制只拿这个距离和半径、边框宽比，比它们大多少都画得一样；再截到 32767 减可见部分的宽或高再减 1（不小于 0），绘制时把距离和可见范围相加不会超出 16 位。原来装得进 16 位的矩形，第二道截断不起作用。
+- 线性渐变：`LinearGradientCommand` 的四个裁剪距离改成 32 位，`draw_linear_gradient` 里的乘积用 64/128 位算。原来超过 32767 时 16 位相加溢出（debug 下 panic）。
+- `draw_path`：路径要按完整外框拟合和描边，不能只取可见部分。外框转不了 16 位时整条路径跳过。
+- `fill_rectangle`、`draw_path` 的裁剪区改用 `try_cast`，转不了就跳过这一笔。
+
+没改的：图片用 32 位坐标，本来不崩；字形位置用 `as i16` 饱和，超出的字形本来就在窗口外。SDF 字形 Listary 不用。
+
+测试（`cargo test -p slint --no-default-features --features std,compat-1-2,renderer-software --test software_renderer_far_geometry --test software_renderer_far_geometry_pixels`）：
+
+- `software_renderer_far_geometry.rs`：复现线上那几种选区、光标、超宽矩形，改前 7 条 panic。
+- `software_renderer_far_geometry_pixels.rs`：每个超出范围的图元配一个只在窗口外不同的「近处双胞胎」，两者逐像素比较，整块缓冲和逐行渲染两条路径都比。覆盖纯色、边框、圆角、渐变的矩形在 1/1.25/1.5/2 倍下、三种旋转、正好在 ±32767/32768 边上；约 6 万像素长的选区（滑到末尾和不滑）；NaN 和无穷大不画；超出范围的 Path 跳过；边框比 8192 还宽、四角都在窗口外的圆角矩形和同样的方角矩形画得一样（固定截到 8192 时会把填充画成边框）；宽或高正好 32766、32767 像素的圆角矩形照常画出四条直边。原先 6 条改前全部 panic。旋转 90° 时竖直渐变允许差 1：没打补丁的 v1.18.1 上，两个都在 16 位范围里、只长度不同的渐变矩形转 90° 后颜色就差 1，不是这处补丁带来的。
+
+升级：上游 master 仍是先转换后裁剪。上游不改就把这些处挑过去。
 
 ## 上游 PR 回移：软件渲染器画 `drop-shadow-*`（slint-ui/slint#13758）
 
